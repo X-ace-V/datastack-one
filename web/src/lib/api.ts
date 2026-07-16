@@ -335,3 +335,167 @@ export async function uploadRules(projectId: string, file: File): Promise<Artifa
   }
   return (await res.json()) as Artifact;
 }
+
+/** A run's lifecycle status, mirroring the backend `RUN_STATUSES`. */
+export type RunStatus = "pending" | "running" | "success" | "failed" | "rejected";
+
+/** A single stage's status, mirroring the backend `STEP_STATUSES`. */
+export type StepStatus = "pending" | "running" | "success" | "failed" | "skipped";
+
+/** A human's decision on a gated stage, mirroring the backend `APPROVAL_ACTIONS`. */
+export type ApprovalAction = "approve" | "reject";
+
+/** A persisted pipeline run, mirroring the backend `RunSchema` (FR9). */
+export interface Run {
+  id: string;
+  projectId: string;
+  status: RunStatus;
+  model: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A persisted per-stage step of a run, mirroring the backend `RunStepSchema` (FR9). */
+export interface RunStep {
+  id: string;
+  runId: string;
+  name: string;
+  ordinal: number;
+  status: StepStatus;
+  detail: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+/**
+ * A gated stage's pending approval request, mirroring the backend `RunApprovalRequestSchema`
+ * (FR8). Carries the exact SQL to be executed when known (the transform), a human-readable
+ * summary otherwise, and the tool args — everything the `ApprovalModal` shows before a human
+ * approves execution. `requestID` is answered via `POST /api/runs/:runId/approvals/:requestID`.
+ */
+export interface RunApprovalRequest {
+  requestID: string;
+  runId: string;
+  stepId: string;
+  stepName: string;
+  tool: string;
+  summary: string;
+  sql: string | null;
+  args: Record<string, unknown>;
+}
+
+/** Result of `POST /api/projects/:id/run`: the created run and its ordered pending steps. */
+export interface RunResult {
+  run: Run;
+  steps: RunStep[];
+}
+
+/** Result of `GET /api/runs/:runId`: the run, its steps, and any approvals awaiting a human. */
+export interface RunState {
+  run: Run;
+  steps: RunStep[];
+  approvals: RunApprovalRequest[];
+}
+
+/**
+ * A run-progress event streamed over SSE (FR9), mirroring the backend `RunEventSchema`
+ * discriminated union: run-level status transitions, per-step status transitions, and the
+ * approval request/resolution pair that surfaces the FR8 gate.
+ */
+export type RunEvent =
+  | { kind: "run.status"; runId: string; status: RunStatus }
+  | {
+      kind: "step.status";
+      runId: string;
+      stepId: string;
+      name: string;
+      status: StepStatus;
+      detail: string | null;
+    }
+  | { kind: "approval.requested"; runId: string; request: RunApprovalRequest }
+  | { kind: "approval.resolved"; runId: string; requestID: string; action: ApprovalAction };
+
+/** The named SSE channels the run-events stream publishes, one per {@link RunEvent} kind. */
+const RUN_EVENT_KINDS: RunEvent["kind"][] = [
+  "run.status",
+  "step.status",
+  "approval.requested",
+  "approval.resolved",
+];
+
+/**
+ * Start a pipeline run for a project (FR8/FR9). The backend resolves the source and the reviewed
+ * transform, creates the run plus one pending step per stage, launches the scripted runner in the
+ * background and returns 202 immediately — the run then pauses at each gated stage for approval.
+ * Subscribe to {@link subscribeRunEvents} for progress and answer gates via {@link resolveRunApproval}.
+ */
+export async function startRun(
+  projectId: string,
+  options: { sourceId?: string; model?: string } = {},
+): Promise<RunResult> {
+  const res = await fetch(`/api/projects/${projectId}/run`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(options),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to start run"));
+  }
+  return (await res.json()) as RunResult;
+}
+
+/**
+ * Fetch a run's current state (FR9/FR12): the run row, its ordered steps, and any approvals still
+ * awaiting a human. Used to reconcile after (re)connecting — a gated stage that requested approval
+ * before the SSE stream connected stays pending here, so this recovers it rather than deadlocking.
+ */
+export async function getRunState(runId: string): Promise<RunState> {
+  const res = await fetch(`/api/runs/${runId}`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load run"));
+  }
+  return (await res.json()) as RunState;
+}
+
+/**
+ * Answer a run's gated stage (FR8): approve lets the tool run once, reject aborts the run. The
+ * backend records the decision to the run's lineage (FR12) and unblocks the parked runner.
+ */
+export async function resolveRunApproval(
+  runId: string,
+  requestID: string,
+  action: ApprovalAction,
+): Promise<void> {
+  const res = await fetch(`/api/runs/${runId}/approvals/${requestID}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to submit approval"));
+  }
+}
+
+/**
+ * Subscribe to a run's progress events over SSE (FR9). Opens an `EventSource` on
+ * `GET /api/runs/:runId/events` and invokes `onEvent` for every {@link RunEvent} the runner emits
+ * (each arrives on a named channel matching its `kind`). Returns an unsubscribe function that
+ * closes the stream; call it when the component unmounts or the run changes.
+ */
+export function subscribeRunEvents(
+  runId: string,
+  onEvent: (event: RunEvent) => void,
+): () => void {
+  const source = new EventSource(`/api/runs/${runId}/events`);
+  const listener = (event: MessageEvent) => {
+    try {
+      onEvent(JSON.parse(event.data) as RunEvent);
+    } catch {
+      // Ignore a malformed frame rather than tearing down the whole stream.
+    }
+  };
+  for (const kind of RUN_EVENT_KINDS) {
+    source.addEventListener(kind, listener as EventListener);
+  }
+  return () => source.close();
+}
