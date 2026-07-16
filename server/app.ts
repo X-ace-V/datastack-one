@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
+import type { RunBridge } from "./opencode/bridge.js";
 
 /** Backend identity, surfaced by `/api/health` so a client can confirm the target. */
 export const SERVICE_NAME = "datastack-one";
@@ -14,6 +15,11 @@ export const SERVICE_VERSION = "0.0.0";
 export interface ServerDeps {
   /** OpenCode client slice used by `GET /api/models`. Absent → the route reports 503. */
   opencode?: ModelsClient;
+  /**
+   * Bridge relaying OpenCode progress events to SSE (FR9). Absent → the run-events route
+   * reports 503, since a health-only boot has no runtime to stream from.
+   */
+  bridge?: RunBridge;
 }
 
 /**
@@ -43,6 +49,39 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       return reply.code(503).send({ error: "model runtime unavailable" });
     }
     return await listModels(deps.opencode);
+  });
+
+  // FR9: stream a run's progress (agent reasoning, tool calls, per-stage status) to the UI
+  // as Server-Sent Events. The bridge fans the OpenCode event stream out per run; here we
+  // just open a long-lived SSE response and forward each frame the bridge hands us until
+  // the client disconnects. Fastify's reply is hijacked so it does not also try to send.
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId/events", (req, reply) => {
+    if (!deps.bridge) {
+      return reply.code(503).send({ error: "run event stream unavailable" });
+    }
+
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      // Defeat proxy buffering so frames arrive as they are produced.
+      "x-accel-buffering": "no",
+    });
+    // An initial comment flushes headers immediately and primes the connection.
+    res.write(": connected\n\n");
+
+    const unsubscribe = deps.bridge.subscribe(req.params.runId, (frame) => {
+      res.write(frame);
+    });
+
+    req.raw.on("close", () => {
+      unsubscribe();
+      res.end();
+    });
+
+    return reply;
   });
 
   return app;
