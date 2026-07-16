@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { StepShell } from "../components/StepShell";
 import {
+  generatePlan,
   getRules,
   listProjects,
   saveRules,
   uploadRules,
   type Artifact,
+  type Plan,
   type Project,
 } from "../lib/api";
 
@@ -26,6 +28,8 @@ export function PlanPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [plan, setPlan] = useState<Plan | null>(null);
+  const [planning, setPlanning] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Load projects on mount and default the selection to the newest one.
@@ -50,6 +54,7 @@ export function PlanPage() {
     setSaved(false);
     setCurrent(null);
     setRulesText("");
+    setPlan(null);
     if (!projectId) return;
     let active = true;
     getRules(projectId)
@@ -102,6 +107,24 @@ export function PlanPage() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleGeneratePlan() {
+    if (!projectId) {
+      setError("Select a project first.");
+      return;
+    }
+    setPlanning(true);
+    setError(null);
+    setPlan(null);
+    try {
+      const result = await generatePlan(projectId);
+      setPlan(result.plan);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPlanning(false);
     }
   }
 
@@ -209,6 +232,49 @@ export function PlanPage() {
             </Link>
           </p>
         )}
+
+        <div className="border-t border-slate-200 pt-4">
+          <h3 className="text-sm font-medium text-slate-700">Architecture plan</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            The agent profiles your source and drafts an ELT plan for DuckDB — execution
+            pattern, partitioning and the ordered pipeline steps — for you to review.
+          </p>
+          <button
+            type="button"
+            onClick={() => void handleGeneratePlan()}
+            disabled={planning || !projectId}
+            className="mt-2 rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {planning ? "Generating…" : "Generate architecture plan"}
+          </button>
+
+          {plan && (
+            <div role="region" aria-label="Generated plan" className="mt-4 space-y-3">
+              <dl className="grid grid-cols-3 gap-2 text-sm">
+                <div>
+                  <dt className="text-xs font-medium text-slate-500">Pattern</dt>
+                  <dd className="text-slate-800">{plan.executionPattern}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium text-slate-500">Warehouse</dt>
+                  <dd className="text-slate-800">{plan.warehouse}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium text-slate-500">Partitioning</dt>
+                  <dd className="text-slate-800">{plan.partitioning}</dd>
+                </div>
+              </dl>
+              {plan.summary && <p className="text-sm text-slate-700">{plan.summary}</p>}
+              <ol className="list-decimal space-y-1 pl-5 text-sm text-slate-700">
+                {plan.steps.map((step, i) => (
+                  <li key={i}>
+                    <span className="font-medium">{step.name}</span> — {step.description}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+        </div>
       </div>
     </StepShell>
   );

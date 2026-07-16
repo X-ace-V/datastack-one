@@ -61,6 +61,21 @@ export interface ProfileResult {
   profile: SourceProfile;
 }
 
+/** One ordered pipeline step in an architecture plan, mirroring the backend `PlanStepSchema` (FR3). */
+export interface PlanStep {
+  name: string;
+  description: string;
+}
+
+/** A generated architecture plan, mirroring the backend `PlanSchema` (FR3). */
+export interface Plan {
+  executionPattern: string;
+  warehouse: string;
+  partitioning: string;
+  steps: PlanStep[];
+  summary?: string;
+}
+
 /** A generated artifact (rules doc, plan, SQL, …), mirroring the backend `ArtifactSchema` (FR6). */
 export interface Artifact {
   id: string;
@@ -176,6 +191,33 @@ export async function saveRules(projectId: string, rules: string): Promise<Artif
     throw new Error(await errorMessage(res, "Failed to save rules"));
   }
   return (await res.json()) as Artifact;
+}
+
+/** Result of `POST /api/projects/:id/plan`: the generated plan and its persisted artifact. */
+export interface PlanResult {
+  plan: Plan;
+  artifact: Artifact;
+}
+
+/**
+ * Generate the architecture plan for a project (FR3). Drives the constrained plan stage on
+ * the backend, which profiles the source, reads the current rules, prompts the agent for a
+ * structured plan and persists it as a `plan` artifact. An optional `model` (`provider/model`)
+ * overrides the default free model for this run.
+ */
+export async function generatePlan(
+  projectId: string,
+  options: { sourceId?: string; model?: string } = {},
+): Promise<PlanResult> {
+  const res = await fetch(`/api/projects/${projectId}/plan`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(options),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to generate plan"));
+  }
+  return (await res.json()) as PlanResult;
 }
 
 /** Upload a rules document file (FR6) as multipart and return the persisted `rules` artifact. */

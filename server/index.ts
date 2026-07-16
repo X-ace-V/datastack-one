@@ -23,7 +23,13 @@ async function main(): Promise<void> {
     onEvent: (event) => approvals.ingest(event),
     onError: (error) => console.error("run event bridge error:", error),
   });
-  const app = buildServer({ opencode: runtime.client, bridge, approvals, store });
+  const app = buildServer({
+    opencode: runtime.client,
+    planner: runtime.client,
+    bridge,
+    approvals,
+    store,
+  });
 
   // Stop the bridge pump, then the spawned opencode process, then close the store, when the
   // HTTP server closes, so a shutdown doesn't leave an orphaned subprocess, a dangling

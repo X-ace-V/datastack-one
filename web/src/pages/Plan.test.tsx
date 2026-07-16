@@ -181,6 +181,56 @@ describe("plan rules page", () => {
     expect(status.textContent).toContain("Rules saved");
   });
 
+  it("generates a plan and renders its pattern, warehouse and steps", async () => {
+    const postCalls: PostCall[] = [];
+    const plan = {
+      executionPattern: "ELT",
+      warehouse: "duckdb",
+      partitioning: "Partition landed Parquet by ingestion date.",
+      steps: [
+        { name: "Extract", description: "Read the uploaded CSV." },
+        { name: "Land Parquet", description: "Write Parquet partitioned by date." },
+        { name: "Publish", description: "Serve the final table." },
+      ],
+      summary: "An ELT pipeline into DuckDB.",
+    };
+    installFetch({
+      projects: [makeProject()],
+      currentRules: null,
+      onPost: () => jsonResponse(200, { plan, artifact: makeArtifact({ kind: "plan" }) }),
+      postCalls,
+    });
+    renderPage();
+
+    const generate = await screen.findByRole("button", { name: /generate architecture plan/i });
+    fireEvent.click(generate);
+
+    const region = await screen.findByRole("region", { name: /generated plan/i });
+    expect(region.textContent).toContain("ELT");
+    expect(region.textContent).toContain("duckdb");
+    expect(region.textContent).toContain("Extract");
+    expect(region.textContent).toContain("Publish");
+
+    // Exactly one JSON POST to the selected project's plan route.
+    expect(postCalls).toHaveLength(1);
+    expect(postCalls[0]?.url).toBe("/api/projects/p-1/plan");
+    expect(JSON.parse(String(postCalls[0]?.body))).toEqual({});
+  });
+
+  it("surfaces a plan-generation error", async () => {
+    installFetch({
+      projects: [makeProject()],
+      currentRules: null,
+      onPost: () => jsonResponse(422, { error: "could not generate a plan" }),
+      postCalls: [],
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /generate architecture plan/i }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("could not generate a plan");
+  });
+
   it("surfaces a backend error", async () => {
     installFetch({
       projects: [makeProject()],

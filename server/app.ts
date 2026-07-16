@@ -6,8 +6,10 @@ import { ApprovalDecisionSchema } from "./core/approvals.js";
 import { CreateProjectRequestSchema } from "./core/projects.js";
 import { ProfileRequestSchema } from "./core/profile.js";
 import { RulesInputSchema } from "./core/artifacts.js";
+import { PlanRequestSchema, PlanParseError } from "./core/plan.js";
 import { isCsvFilename } from "./core/sources.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
+import { runPlanStage, PlanRuntimeError, type PlanClient } from "./pipeline/plan.js";
 import type { RunBridge } from "./opencode/bridge.js";
 import type { WarehouseStore } from "./store/duckdb.js";
 import { getProject, insertProject, listProjects } from "./store/projects.js";
@@ -39,6 +41,13 @@ export const SERVICE_VERSION = "0.0.0";
 export interface ServerDeps {
   /** OpenCode client slice used by `GET /api/models`. Absent → the route reports 503. */
   opencode?: ModelsClient;
+  /**
+   * OpenCode client slice used by the plan stage (`POST /api/projects/:id/plan`, FR3) — it
+   * needs `session.create`/`session.prompt`, a wider surface than {@link ModelsClient}.
+   * Injected separately so the plan route's tests can mock just the session, and so a
+   * health-only boot (no runtime) reports 503 rather than pretending to plan.
+   */
+  planner?: PlanClient;
   /**
    * Bridge relaying OpenCode progress events to SSE (FR9). Absent → the run-events route
    * reports 503, since a health-only boot has no runtime to stream from.
@@ -260,6 +269,93 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       const updated =
         (await updateSourceRowCount(deps.store, source.id, profile.rowCount)) ?? source;
       return reply.code(200).send({ source: updated, profile });
+    },
+  );
+
+  // FR3: generate an architecture plan for a project. Profiles the source for context (the
+  // named `sourceId`, else the project's newest upload), reads the current rules doc if any,
+  // then drives one constrained, tool-free `session.prompt` that returns a structured plan
+  // (execution pattern, warehouse, partitioning, ordered steps). The validated plan is
+  // persisted as a `plan` artifact via `write_artifact` so the Review step can render it.
+  // Status map: 503 unwired store/planner, 400 bad body / no source, 404 unknown project or
+  // cross-project source, 422 unreadable CSV or a model output that is not a valid plan, 502
+  // the agent runtime failed, 200 success.
+  app.post<{ Params: { id: string } }>(
+    "/api/projects/:id/plan",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+      if (!deps.planner) {
+        return reply.code(503).send({ error: "planning runtime unavailable" });
+      }
+
+      const parsed = PlanRequestSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid plan request", details: parsed.error.issues });
+      }
+
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+
+      // Resolve the source to profile: the named one, or the newest upload for the project.
+      let source;
+      if (parsed.data.sourceId) {
+        source = await getSource(deps.store, parsed.data.sourceId);
+        if (!source || source.projectId !== project.id) {
+          return reply.code(404).send({ error: "source not found" });
+        }
+      } else {
+        const sources = await listSources(deps.store, project.id);
+        source = sources[0];
+        if (!source) {
+          return reply.code(400).send({ error: "no source to plan from" });
+        }
+      }
+
+      let profile;
+      try {
+        profile = await profileSource(deps.store, source.path);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(422).send({ error: `could not profile source: ${message}` });
+      }
+
+      const rulesArtifact = await getLatestArtifactByKind(
+        deps.store,
+        project.id,
+        "rules",
+      );
+
+      let plan;
+      try {
+        plan = await runPlanStage(deps.planner, {
+          profile,
+          rules: rulesArtifact?.content ?? null,
+          model: parsed.data.model,
+        });
+      } catch (err) {
+        if (err instanceof PlanParseError) {
+          return reply.code(422).send({ error: `could not generate a plan: ${err.message}` });
+        }
+        if (err instanceof PlanRuntimeError) {
+          return reply.code(502).send({ error: err.message });
+        }
+        throw err;
+      }
+
+      const artifact = await writeArtifact(deps.store, {
+        dir: artifactsDir,
+        projectId: project.id,
+        kind: "plan",
+        name: "plan.json",
+        content: JSON.stringify(plan, null, 2),
+      });
+      return reply.code(200).send({ plan, artifact });
     },
   );
 
