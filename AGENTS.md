@@ -34,3 +34,5 @@ Authoritative references: `PRD.md` (contract) · `ARCHITECTURE.md` (design) ·
 ## Lessons learned (append, never repeat)
 
 - `TASKS.md`/`PROGRESS.md`/`LOOP.md`/`loop.sh` are gitignored (internal loop state) — edits to them won't appear in `git status`/`git add`; commits contain code only. That's by design, not a bug.
+- The `.js`-extension import rule is server-only (NodeNext). `web/` has its own `web/tsconfig.json` (`moduleResolution: bundler`, `jsx: react-jsx`, DOM lib) and uses **extensionless** relative imports; `npm run typecheck` runs both projects. Web component tests live at `web/**/*.test.tsx`, opt into jsdom via a `// @vitest-environment jsdom` docblock, and rely on `@vitejs/plugin-react` in `vitest.config.ts` for JSX.
+- vitest 2.x peers on vite ^5, so keep root `vite` on ^5 — installing vite@6 makes vitest pull a second nested vite and the two `Plugin` types clash in `vitest.config.ts` typecheck.
