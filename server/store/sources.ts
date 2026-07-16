@@ -77,6 +77,36 @@ export async function insertSource(
   return rowToSource(row);
 }
 
+/** Fetch a single source by id, or `null` if none exists. */
+export async function getSource(
+  store: WarehouseStore,
+  id: string,
+): Promise<Source | null> {
+  const rows = await store.all(
+    `SELECT ${SOURCE_COLUMNS} FROM platform.sources WHERE id = $1`,
+    [id],
+  );
+  const row = rows[0];
+  return row ? rowToSource(row) : null;
+}
+
+/**
+ * Record a source's profiled row count (T2.4, FR2). Uploading leaves `row_count` null until
+ * the profile stage runs; this fills it in and returns the updated row, or `null` if the id
+ * is unknown. The count binds as a parameter like every other write.
+ */
+export async function updateSourceRowCount(
+  store: WarehouseStore,
+  id: string,
+  rowCount: number,
+): Promise<Source | null> {
+  await store.run(
+    `UPDATE platform.sources SET row_count = $1 WHERE id = $2`,
+    [rowCount, id],
+  );
+  return getSource(store, id);
+}
+
 /** List a project's sources, newest first (id breaks ties for a stable order). */
 export async function listSources(
   store: WarehouseStore,

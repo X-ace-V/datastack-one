@@ -4,12 +4,19 @@ import multipart from "@fastify/multipart";
 import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
 import { ApprovalDecisionSchema } from "./core/approvals.js";
 import { CreateProjectRequestSchema } from "./core/projects.js";
+import { ProfileRequestSchema } from "./core/profile.js";
 import { isCsvFilename } from "./core/sources.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
 import type { RunBridge } from "./opencode/bridge.js";
 import type { WarehouseStore } from "./store/duckdb.js";
 import { getProject, insertProject, listProjects } from "./store/projects.js";
-import { insertSource, listSources } from "./store/sources.js";
+import {
+  getSource,
+  insertSource,
+  listSources,
+  updateSourceRowCount,
+} from "./store/sources.js";
+import { profileSource } from "./tools/profile.js";
 import { DEFAULT_UPLOADS_DIR, saveUpload } from "./store/uploads.js";
 import {
   ApprovalReplyError,
@@ -188,6 +195,61 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       }
       const sources = await listSources(deps.store, project.id);
       return reply.code(200).send({ sources });
+    },
+  );
+
+  // FR2: profile a project's uploaded CSV source. Runs the read-only `profile_source` tool
+  // against the source on disk (schema, types, row count, null %, candidate keys, date cols)
+  // and records the discovered row count on the source. The body may name a `sourceId`; when
+  // omitted, the project's most recent source is profiled. 404 if the project or source is
+  // unknown, 400 if there is nothing to profile or the source belongs to another project.
+  app.post<{ Params: { id: string } }>(
+    "/api/projects/:id/profile",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+
+      const parsed = ProfileRequestSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid profile request", details: parsed.error.issues });
+      }
+
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+
+      // Resolve the source to profile: the named one, or the newest upload for the project.
+      let source;
+      if (parsed.data.sourceId) {
+        source = await getSource(deps.store, parsed.data.sourceId);
+        if (!source || source.projectId !== project.id) {
+          return reply.code(404).send({ error: "source not found" });
+        }
+      } else {
+        const sources = await listSources(deps.store, project.id);
+        source = sources[0];
+        if (!source) {
+          return reply.code(400).send({ error: "no source to profile" });
+        }
+      }
+
+      let profile;
+      try {
+        profile = await profileSource(deps.store, source.path);
+      } catch (err) {
+        // read_csv_auto failed (missing file, unreadable CSV) — report it rather than 500.
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(422).send({ error: `could not profile source: ${message}` });
+      }
+
+      // Persist the discovered row count so the source row reflects the profile.
+      const updated =
+        (await updateSourceRowCount(deps.store, source.id, profile.rowCount)) ?? source;
+      return reply.code(200).send({ source: updated, profile });
     },
   );
 

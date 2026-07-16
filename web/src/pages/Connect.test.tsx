@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ConnectPage } from "./Connect";
-import type { Project, Source } from "../lib/api";
+import type { Project, Source, SourceProfile } from "../lib/api";
 
 /**
  * Component test for the connect-source page (T2.2, FR2). `fetch` is mocked so the test
@@ -141,6 +141,94 @@ describe("connect-source page", () => {
       const items = screen.getAllByText("loans.csv");
       expect(items.length).toBeGreaterThan(0);
     });
+  });
+
+  it("profiles the source and renders the schema table", async () => {
+    const profile: SourceProfile = {
+      rowCount: 4,
+      columnCount: 2,
+      columns: [
+        {
+          name: "loan_id",
+          type: "BIGINT",
+          nullCount: 0,
+          nullPercent: 0,
+          distinctCount: 4,
+          isCandidateKey: true,
+          isDateColumn: false,
+        },
+        {
+          name: "opened_at",
+          type: "DATE",
+          nullCount: 1,
+          nullPercent: 25,
+          distinctCount: 3,
+          isCandidateKey: false,
+          isDateColumn: true,
+        },
+      ],
+      candidateKeys: ["loan_id"],
+      dateColumns: ["opened_at"],
+    };
+    const source = makeSource({ id: "s-1", originalFilename: "loans.csv" });
+    const postCalls: PostCall[] = [];
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && url.endsWith("/profile")) {
+        postCalls.push({ url, body: init?.body as FormData });
+        return jsonResponse(200, { source: { ...source, rowCount: 4 }, profile });
+      }
+      if (url.endsWith("/sources")) {
+        return jsonResponse(200, { sources: [source] });
+      }
+      return jsonResponse(200, { projects: [makeProject()] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage();
+
+    const button = await screen.findByRole("button", { name: /profile schema/i });
+    fireEvent.click(button);
+
+    // The profile stage was requested for the selected project.
+    await waitFor(() => expect(postCalls).toHaveLength(1));
+    expect(postCalls[0]?.url).toBe("/api/projects/p-1/profile");
+
+    // The schema table renders the profiled columns, types and the candidate-key flag.
+    const table = await screen.findByRole("region", { name: /source profile/i });
+    expect(table.textContent).toContain("loan_id");
+    expect(table.textContent).toContain("BIGINT");
+    expect(table.textContent).toContain("opened_at");
+    expect(table.textContent).toContain("DATE");
+    expect(table.textContent).toContain("key");
+    // The row count is now shown on the source row.
+    await waitFor(() => {
+      expect(screen.getByText(/4 rows/)).toBeTruthy();
+    });
+  });
+
+  it("surfaces a backend profile error", async () => {
+    const source = makeSource({ id: "s-1", originalFilename: "loans.csv" });
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && url.endsWith("/profile")) {
+        return jsonResponse(422, { error: "could not profile source: bad csv" });
+      }
+      if (url.endsWith("/sources")) {
+        return jsonResponse(200, { sources: [source] });
+      }
+      return jsonResponse(200, { projects: [makeProject()] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage();
+    const button = await screen.findByRole("button", { name: /profile schema/i });
+    fireEvent.click(button);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("could not profile source");
   });
 
   it("surfaces a backend upload error", async () => {

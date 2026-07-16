@@ -35,6 +35,32 @@ export interface Source {
   createdAt: string;
 }
 
+/** Per-column profile, mirroring the backend `ColumnProfileSchema` (FR2). */
+export interface ColumnProfile {
+  name: string;
+  type: string;
+  nullCount: number;
+  nullPercent: number;
+  distinctCount: number;
+  isCandidateKey: boolean;
+  isDateColumn: boolean;
+}
+
+/** A profiled CSV source, mirroring the backend `SourceProfileSchema` (FR2). */
+export interface SourceProfile {
+  rowCount: number;
+  columnCount: number;
+  columns: ColumnProfile[];
+  candidateKeys: string[];
+  dateColumns: string[];
+}
+
+/** Result of `POST /api/projects/:id/profile`: the updated source and its profile. */
+export interface ProfileResult {
+  source: Source;
+  profile: SourceProfile;
+}
+
 /** Pull an `{ error }` message out of a failed response body, falling back to the status. */
 async function errorMessage(res: Response, fallback: string): Promise<string> {
   try {
@@ -79,6 +105,26 @@ export async function listSources(projectId: string): Promise<Source[]> {
   }
   const body = (await res.json()) as { sources: Source[] };
   return body.sources;
+}
+
+/**
+ * Run the profile stage for a project (FR2). Profiles the given source, or the project's
+ * most recent upload when `sourceId` is omitted, returning the schema profile the
+ * `SchemaTable` renders plus the source with its now-known row count.
+ */
+export async function profileSource(
+  projectId: string,
+  sourceId?: string,
+): Promise<ProfileResult> {
+  const res = await fetch(`/api/projects/${projectId}/profile`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sourceId ? { sourceId } : {}),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to profile source"));
+  }
+  return (await res.json()) as ProfileResult;
 }
 
 /** Upload a CSV file as a source for a project and return the persisted row. */

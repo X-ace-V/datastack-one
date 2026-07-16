@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { Link } from "react-router-dom";
 import { StepShell } from "../components/StepShell";
+import { SchemaTable } from "../components/SchemaTable";
 import {
   listProjects,
   listSources,
+  profileSource,
   uploadSource,
   type Project,
   type Source,
+  type SourceProfile,
 } from "../lib/api";
 
 /**
@@ -24,6 +27,8 @@ export function ConnectPage() {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploaded, setUploaded] = useState<Source | null>(null);
+  const [profile, setProfile] = useState<SourceProfile | null>(null);
+  const [profiling, setProfiling] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Load projects on mount and default the selection to the newest one.
@@ -45,6 +50,7 @@ export function ConnectPage() {
 
   // Whenever the selected project changes, load its existing sources.
   useEffect(() => {
+    setProfile(null);
     if (!projectId) {
       setSources([]);
       return;
@@ -70,6 +76,7 @@ export function ConnectPage() {
     setUploading(true);
     setError(null);
     setUploaded(null);
+    setProfile(null);
     try {
       const source = await uploadSource(projectId, file);
       setSources((prev) => [source, ...prev]);
@@ -78,6 +85,26 @@ export function ConnectPage() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setUploading(false);
+    }
+  }
+
+  // FR2 / T2.4: run the profile stage for the selected project's newest source and render the
+  // returned schema. The persisted row count on that source is refreshed from the response.
+  async function handleProfile() {
+    if (!projectId) return;
+    setProfiling(true);
+    setError(null);
+    setProfile(null);
+    try {
+      const result = await profileSource(projectId);
+      setProfile(result.profile);
+      setSources((prev) =>
+        prev.map((s) => (s.id === result.source.id ? result.source : s)),
+      );
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProfiling(false);
     }
   }
 
@@ -182,7 +209,19 @@ export function ConnectPage() {
         )}
 
         <section aria-label="Uploaded sources">
-          <h2 className="text-sm font-semibold text-slate-700">Uploaded sources</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-slate-700">Uploaded sources</h2>
+            {sources.length > 0 && (
+              <button
+                type="button"
+                onClick={() => void handleProfile()}
+                disabled={profiling}
+                className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {profiling ? "Profiling…" : "Profile schema"}
+              </button>
+            )}
+          </div>
           {sources.length === 0 ? (
             <p className="mt-2 text-sm text-slate-500">No sources uploaded yet.</p>
           ) : (
@@ -193,11 +232,22 @@ export function ConnectPage() {
                     {source.originalFilename ?? source.id}
                   </span>
                   <span className="text-slate-500"> — {source.kind}</span>
+                  {source.rowCount != null && (
+                    <span className="text-slate-500">
+                      {" "}· {source.rowCount.toLocaleString()} rows
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>
           )}
         </section>
+
+        {profile && (
+          <div className="mt-2">
+            <SchemaTable profile={profile} />
+          </div>
+        )}
       </div>
     </StepShell>
   );

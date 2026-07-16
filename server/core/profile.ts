@@ -80,6 +80,17 @@ export const SourceProfileSchema = z.object({
 });
 export type SourceProfile = z.infer<typeof SourceProfileSchema>;
 
+/**
+ * Body of `POST /api/projects/:id/profile` (T2.4). Profiling targets one uploaded source;
+ * `sourceId` names it explicitly, and when omitted the route profiles the project's most
+ * recent source. The body may be absent entirely, so both fields are optional.
+ */
+export const ProfileRequestSchema = z.object({
+  /** Id of the source to profile; defaults to the project's newest source when omitted. */
+  sourceId: z.string().min(1).optional(),
+});
+export type ProfileRequest = z.infer<typeof ProfileRequestSchema>;
+
 /** Raw per-column statistics a profiler gathers before classification. */
 export interface RawColumnStat {
   /** Column name from the CSV header. */
