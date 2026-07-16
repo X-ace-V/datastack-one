@@ -1,6 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
+import {
+  DuckDBInstance,
+  type DuckDBConnection,
+  type DuckDBValue,
+} from "@duckdb/node-api";
 
 /**
  * DuckDB metadata store. This module owns the single warehouse file and the
@@ -134,10 +138,14 @@ export interface WarehouseStore {
   readonly connection: DuckDBConnection;
   /** The path this store was opened at (`:memory:` in tests). */
   readonly path: string;
-  /** Execute a statement that returns no rows the caller needs. */
-  run(sql: string): Promise<void>;
-  /** Execute a query and materialize its rows as plain objects. */
-  all(sql: string): Promise<Record<string, unknown>[]>;
+  /**
+   * Execute a statement that returns no rows the caller needs. Optional positional
+   * `values` bind to `$1`, `$2`, … placeholders so callers never string-concatenate
+   * user input into SQL (the only injection-safe way to persist request bodies).
+   */
+  run(sql: string, values?: DuckDBValue[]): Promise<void>;
+  /** Execute a query and materialize its rows as plain objects, with the same binding. */
+  all(sql: string, values?: DuckDBValue[]): Promise<Record<string, unknown>[]>;
   /** Close the connection and its owning instance. */
   close(): Promise<void>;
 }
@@ -170,11 +178,14 @@ export async function openStore(
   const store: WarehouseStore = {
     connection,
     path,
-    async run(sql: string): Promise<void> {
-      await connection.run(sql);
+    async run(sql: string, values?: DuckDBValue[]): Promise<void> {
+      await connection.run(sql, values);
     },
-    async all(sql: string): Promise<Record<string, unknown>[]> {
-      const reader = await connection.runAndReadAll(sql);
+    async all(
+      sql: string,
+      values?: DuckDBValue[],
+    ): Promise<Record<string, unknown>[]> {
+      const reader = await connection.runAndReadAll(sql, values);
       return reader.getRowObjects();
     },
     async close(): Promise<void> {

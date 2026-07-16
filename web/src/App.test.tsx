@@ -1,11 +1,22 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "./App";
 import { WIZARD_STEPS } from "./wizard";
 
-afterEach(cleanup);
+// The Create step fetches `/api/projects` on mount; stub it so these routing tests
+// never touch the network and stay deterministic.
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ projects: [] }) })),
+  );
+});
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 function renderAt(path: string) {
   return render(

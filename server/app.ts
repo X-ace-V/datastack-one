@@ -1,8 +1,11 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
 import { ApprovalDecisionSchema } from "./core/approvals.js";
+import { CreateProjectRequestSchema } from "./core/projects.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
 import type { RunBridge } from "./opencode/bridge.js";
+import type { WarehouseStore } from "./store/duckdb.js";
+import { insertProject, listProjects } from "./store/projects.js";
 import {
   ApprovalReplyError,
   UnknownApprovalError,
@@ -31,6 +34,11 @@ export interface ServerDeps {
    * reports 503, since a health-only boot has no runtime to approve against.
    */
   approvals?: ApprovalGate;
+  /**
+   * Metadata store backing the project routes (FR1). Absent → the project routes report
+   * 503, since a health-only boot has no warehouse to persist to.
+   */
+  store?: WarehouseStore;
 }
 
 /**
@@ -60,6 +68,35 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       return reply.code(503).send({ error: "model runtime unavailable" });
     }
     return await listModels(deps.opencode);
+  });
+
+  // FR1: create a project. The body is validated against the shared contract (400 on a bad
+  // request); on success the persisted row — with its server-generated id, applied warehouse
+  // default, and created_at timestamp — is returned with 201. All user fields are bound as
+  // parameters by the store, so nothing here concatenates input into SQL.
+  app.post("/api/projects", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "project store unavailable" });
+    }
+
+    const parsed = CreateProjectRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid project", details: parsed.error.issues });
+    }
+
+    const project = await insertProject(deps.store, parsed.data);
+    return reply.code(201).send(project);
+  });
+
+  // FR1: list projects, newest first, for the create page and later wizard steps.
+  app.get("/api/projects", async (_req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "project store unavailable" });
+    }
+    const projects = await listProjects(deps.store);
+    return reply.code(200).send({ projects });
   });
 
   // FR9: stream a run's progress (agent reasoning, tool calls, per-stage status) to the UI

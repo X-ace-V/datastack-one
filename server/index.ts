@@ -1,4 +1,5 @@
 import { buildServer } from "./app.js";
+import { openStore } from "./store/duckdb.js";
 import { createDatastackOpencode } from "./opencode/client.js";
 import { createRunBridge } from "./opencode/bridge.js";
 import { createApprovalGate } from "./opencode/approvals.js";
@@ -8,6 +9,9 @@ const PORT = Number(process.env.PORT ?? 3001);
 const HOST = process.env.HOST ?? "127.0.0.1";
 
 async function main(): Promise<void> {
+  // Open (and migrate) the metadata store so the project routes can persist to the
+  // `platform` schema the moment HTTP starts accepting requests.
+  const store = await openStore();
   // Spawn the in-process OpenCode server first so its client is available to the
   // routes (e.g. `GET /api/models`) the moment HTTP starts accepting requests.
   const runtime = await createDatastackOpencode({ hostname: "127.0.0.1" });
@@ -19,13 +23,15 @@ async function main(): Promise<void> {
     onEvent: (event) => approvals.ingest(event),
     onError: (error) => console.error("run event bridge error:", error),
   });
-  const app = buildServer({ opencode: runtime.client, bridge, approvals });
+  const app = buildServer({ opencode: runtime.client, bridge, approvals, store });
 
-  // Stop the bridge pump, then the spawned opencode process, when the HTTP server closes,
-  // so a shutdown doesn't leave an orphaned subprocess or a dangling subscription.
+  // Stop the bridge pump, then the spawned opencode process, then close the store, when the
+  // HTTP server closes, so a shutdown doesn't leave an orphaned subprocess, a dangling
+  // subscription, or an open warehouse handle.
   app.addHook("onClose", async () => {
     await bridge.close();
     runtime.close();
+    await store.close();
   });
 
   const address = await app.listen({ port: PORT, host: HOST });
