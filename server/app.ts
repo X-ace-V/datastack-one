@@ -5,6 +5,7 @@ import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
 import { ApprovalDecisionSchema } from "./core/approvals.js";
 import { CreateProjectRequestSchema } from "./core/projects.js";
 import { ProfileRequestSchema } from "./core/profile.js";
+import { RulesInputSchema } from "./core/artifacts.js";
 import { isCsvFilename } from "./core/sources.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
 import type { RunBridge } from "./opencode/bridge.js";
@@ -17,6 +18,8 @@ import {
   updateSourceRowCount,
 } from "./store/sources.js";
 import { profileSource } from "./tools/profile.js";
+import { DEFAULT_ARTIFACTS_DIR, writeArtifact } from "./tools/rules.js";
+import { getLatestArtifactByKind } from "./store/artifacts.js";
 import { DEFAULT_UPLOADS_DIR, saveUpload } from "./store/uploads.js";
 import {
   ApprovalReplyError,
@@ -56,6 +59,12 @@ export interface ServerDeps {
    * tests override it with a tmp dir so they never touch the repo's `data/`.
    */
   uploadsDir?: string;
+  /**
+   * Directory generated artifacts (rules docs, plan, SQL, DDL, DQ spec) are written to
+   * (FR6). Defaults to {@link DEFAULT_ARTIFACTS_DIR}; tests override it with a tmp dir so
+   * they never touch the repo's `data/`.
+   */
+  artifactsDir?: string;
 }
 
 /** Hard cap on an uploaded CSV, keeping a stray huge file from filling the disk. */
@@ -69,6 +78,7 @@ export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   const app = Fastify({ logger: false });
   const uploadsDir = deps.uploadsDir ?? DEFAULT_UPLOADS_DIR;
+  const artifactsDir = deps.artifactsDir ?? DEFAULT_ARTIFACTS_DIR;
 
   // FR2: accept CSV uploads as multipart/form-data. Registered for the whole app; only the
   // source-upload route reads a file, and the size cap guards the disk.
@@ -250,6 +260,84 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       const updated =
         (await updateSourceRowCount(deps.store, source.id, profile.rowCount)) ?? source;
       return reply.code(200).send({ source: updated, profile });
+    },
+  );
+
+  // FR6: submit the plain-English transformation rules document for a project. Rules may
+  // arrive two ways (PRD §9.3) — a multipart file upload, or a JSON `{ rules }` body from the
+  // UI textarea. Either way the text is written to `data/artifacts/` via the `write_artifact`
+  // tool and recorded as a `rules` artifact, so a later plan stage can `read_rules` it. 404
+  // if the project is unknown, 400 for an empty/whitespace-only submission.
+  app.post<{ Params: { id: string } }>(
+    "/api/projects/:id/rules",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+
+      // Resolve the rules text + a filename from whichever input form was used.
+      let content: string;
+      let name: string;
+      if (req.isMultipart()) {
+        const data = await req.file();
+        if (!data) {
+          return reply.code(400).send({ error: "a rules file is required" });
+        }
+        let buffer: Buffer;
+        try {
+          buffer = await data.toBuffer();
+        } catch {
+          // @fastify/multipart throws once the byte stream exceeds the configured limit.
+          return reply
+            .code(400)
+            .send({ error: "the uploaded file exceeds the size limit" });
+        }
+        content = buffer.toString("utf8");
+        if (content.trim().length === 0) {
+          return reply.code(400).send({ error: "the rules document is empty" });
+        }
+        name = data.filename || "rules.txt";
+      } else {
+        const parsed = RulesInputSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return reply
+            .code(400)
+            .send({ error: "invalid rules", details: parsed.error.issues });
+        }
+        content = parsed.data.rules;
+        name = "rules.txt";
+      }
+
+      const artifact = await writeArtifact(deps.store, {
+        dir: artifactsDir,
+        projectId: project.id,
+        kind: "rules",
+        name,
+        content,
+      });
+      return reply.code(201).send(artifact);
+    },
+  );
+
+  // FR6: fetch a project's current (most recent) rules document, or null when none has been
+  // submitted yet, so the Plan page can show what is on file before generating a plan.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/rules",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+      const rules = await getLatestArtifactByKind(deps.store, project.id, "rules");
+      return reply.code(200).send({ rules });
     },
   );
 

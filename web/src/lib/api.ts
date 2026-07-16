@@ -61,6 +61,17 @@ export interface ProfileResult {
   profile: SourceProfile;
 }
 
+/** A generated artifact (rules doc, plan, SQL, …), mirroring the backend `ArtifactSchema` (FR6). */
+export interface Artifact {
+  id: string;
+  projectId: string;
+  runId: string | null;
+  kind: string;
+  path: string | null;
+  content: string | null;
+  createdAt: string;
+}
+
 /** Pull an `{ error }` message out of a failed response body, falling back to the status. */
 async function errorMessage(res: Response, fallback: string): Promise<string> {
   try {
@@ -139,4 +150,44 @@ export async function uploadSource(projectId: string, file: File): Promise<Sourc
     throw new Error(await errorMessage(res, "Failed to upload source"));
   }
   return (await res.json()) as Source;
+}
+
+/** Fetch a project's current rules document (FR6), or `null` if none has been submitted. */
+export async function getRules(projectId: string): Promise<Artifact | null> {
+  const res = await fetch(`/api/projects/${projectId}/rules`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load rules"));
+  }
+  const body = (await res.json()) as { rules: Artifact | null };
+  return body.rules;
+}
+
+/**
+ * Save a project's transformation rules from the UI textarea (FR6) as a JSON body, returning
+ * the persisted `rules` artifact. Uploading a rules file uses {@link uploadRules} instead.
+ */
+export async function saveRules(projectId: string, rules: string): Promise<Artifact> {
+  const res = await fetch(`/api/projects/${projectId}/rules`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rules }),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to save rules"));
+  }
+  return (await res.json()) as Artifact;
+}
+
+/** Upload a rules document file (FR6) as multipart and return the persisted `rules` artifact. */
+export async function uploadRules(projectId: string, file: File): Promise<Artifact> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const res = await fetch(`/api/projects/${projectId}/rules`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to upload rules"));
+  }
+  return (await res.json()) as Artifact;
 }
