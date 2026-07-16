@@ -30,6 +30,12 @@ function fakeBridge() {
         unsubscribed += 1;
       };
     },
+    publish(runId, frame) {
+      const json = JSON.stringify(frame.data ?? null);
+      const wire =
+        (frame.event ? `event: ${frame.event}\n` : "") + `data: ${json}\n\n`;
+      for (const sink of sinks.get(runId) ?? []) sink(wire);
+    },
     async close() {},
   };
   return {

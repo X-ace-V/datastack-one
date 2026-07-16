@@ -1,5 +1,5 @@
 import type { Event, OpencodeClient } from "@opencode-ai/sdk";
-import { formatSseFrame, type RunProgressPayload } from "../core/events.js";
+import { formatSseFrame, type RunProgressPayload, type SseFrame } from "../core/events.js";
 
 /**
  * OpenCode → SSE progress bridge (TASKS T1.3, PRD FR9). Subscribes once to the runtime's
@@ -57,6 +57,12 @@ export interface RunBridge {
    * route calls when the browser disconnects, so dead sockets are dropped.
    */
   subscribe(runId: string, sink: FrameSink): () => void;
+  /**
+   * Push an application-produced frame to a run's subscribers (the scripted runner's per-stage
+   * status + approval events, T4.4). Unlike the OpenCode event fan-out, this is originated by
+   * the platform, not the agent runtime; it is a no-op when the run has no live subscribers.
+   */
+  publish(runId: string, frame: SseFrame): void;
   /** Stop the event pump and drop all subscribers. Idempotent. */
   close(): Promise<void>;
 }
@@ -144,6 +150,12 @@ export function createRunBridge(
         set.delete(sink);
         if (set.size === 0) sinksByRun.delete(runId);
       };
+    },
+    publish(runId, frame) {
+      const sinks = sinksByRun.get(runId);
+      if (!sinks || sinks.size === 0) return;
+      const wire = formatSseFrame(frame);
+      for (const sink of sinks) sink(wire);
     },
     async close() {
       if (closed) return;

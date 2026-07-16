@@ -9,7 +9,14 @@ import { RulesInputSchema } from "./core/artifacts.js";
 import { PlanRequestSchema, PlanParseError } from "./core/plan.js";
 import { TransformRequestSchema, TransformParseError } from "./core/transform.js";
 import { DqRequestSchema, DqParseError } from "./core/dq.js";
-import { isCsvFilename } from "./core/sources.js";
+import { isCsvFilename, type Source } from "./core/sources.js";
+import { TransformSchema, type Transform } from "./core/transform.js";
+import {
+  PIPELINE_STAGES,
+  RunStartRequestSchema,
+  type Run,
+  type RunStep,
+} from "./core/run.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
 import { runPlanStage, PlanRuntimeError, type PlanClient } from "./pipeline/plan.js";
 import {
@@ -32,10 +39,33 @@ import { DEFAULT_ARTIFACTS_DIR, writeArtifact } from "./tools/rules.js";
 import { getLatestArtifactByKind } from "./store/artifacts.js";
 import { DEFAULT_UPLOADS_DIR, saveUpload } from "./store/uploads.js";
 import {
+  createRun,
+  getRunState,
+  insertRunStep,
+  recordApproval,
+} from "./store/runs.js";
+import {
+  UnknownRunApprovalError,
+  type RunApprovalGate,
+} from "./pipeline/run-approvals.js";
+import {
   ApprovalReplyError,
   UnknownApprovalError,
   type ApprovalGate,
 } from "./opencode/approvals.js";
+
+/**
+ * Fire-and-forget launcher for a run's scripted pipeline (T4.4). The route creates the run + its
+ * steps, then hands them here; the launcher owns the per-run wiring of the approval gate and the
+ * SSE emit so the route stays transport-agnostic and its tests can inject a spy. Never awaited —
+ * a run pauses for human approval, so it outlives the HTTP request that started it.
+ */
+export type RunLauncher = (input: {
+  run: Run;
+  steps: RunStep[];
+  source: Source;
+  transform: Transform;
+}) => void;
 
 /** Backend identity, surfaced by `/api/health` so a client can confirm the target. */
 export const SERVICE_NAME = "datastack-one";
@@ -78,6 +108,17 @@ export interface ServerDeps {
    * reports 503, since a health-only boot has no runtime to approve against.
    */
   approvals?: ApprovalGate;
+  /**
+   * Launcher that executes a run's scripted pipeline in the background (FR9, T4.4). Absent →
+   * `POST /api/projects/:id/run` reports 503, since a health-only boot cannot run a pipeline.
+   */
+  launchRun?: RunLauncher;
+  /**
+   * Approval gate the scripted runner parks gated stages on (FR8, T4.4). Answered by
+   * `POST /api/runs/:runId/approvals/:requestID`. Absent → that route reports 503. Distinct
+   * from {@link ServerDeps.approvals} (the OpenCode permission gate).
+   */
+  runApprovals?: RunApprovalGate;
   /**
    * Metadata store backing the project routes (FR1). Absent → the project routes report
    * 503, since a health-only boot has no warehouse to persist to.
@@ -658,6 +699,170 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         getLatestArtifactByKind(deps.store, project.id, "dq_spec"),
       ]);
       return reply.code(200).send({ plan, transform, ddl, dq });
+    },
+  );
+
+  // FR8/FR9 (T4.4): start a pipeline run for a project. Resolves the source (named or newest)
+  // and the reviewed transform artifact (required — the run executes it), creates the run and one
+  // pending step per pipeline stage, then launches the scripted runner in the background and
+  // returns 202 immediately: a run pauses for human approval, so it outlives this request. The
+  // client watches progress on `GET /api/runs/:runId/events` and answers gated stages via
+  // `POST /api/runs/:runId/approvals/:requestID`. Status map: 503 unwired store/runner, 400 bad
+  // body / no source / no reviewed transform, 404 unknown project or cross-project source, 422 the
+  // stored transform is not valid, 202 the run started.
+  app.post<{ Params: { id: string } }>(
+    "/api/projects/:id/run",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+      if (!deps.launchRun) {
+        return reply.code(503).send({ error: "run runtime unavailable" });
+      }
+
+      const parsed = RunStartRequestSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid run request", details: parsed.error.issues });
+      }
+
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+
+      // Resolve the source to run: the named one, or the newest upload for the project.
+      let source;
+      if (parsed.data.sourceId) {
+        source = await getSource(deps.store, parsed.data.sourceId);
+        if (!source || source.projectId !== project.id) {
+          return reply.code(404).send({ error: "source not found" });
+        }
+      } else {
+        const sources = await listSources(deps.store, project.id);
+        source = sources[0];
+        if (!source) {
+          return reply.code(400).send({ error: "no source to run" });
+        }
+      }
+
+      // The run executes the reviewed transform, so one must have been generated + approved first.
+      const transformArtifact = await getLatestArtifactByKind(
+        deps.store,
+        project.id,
+        "transform_sql",
+      );
+      if (!transformArtifact?.content) {
+        return reply
+          .code(400)
+          .send({ error: "no reviewed transform to run; generate and review one first" });
+      }
+      let transform;
+      try {
+        transform = TransformSchema.parse(JSON.parse(transformArtifact.content));
+      } catch {
+        return reply
+          .code(422)
+          .send({ error: "the stored transform artifact is not a valid transform" });
+      }
+
+      // Create the run + one pending step per pipeline stage before launching, so the run is
+      // fully persisted and queryable the moment the client subscribes to its progress.
+      const run = await createRun(deps.store, {
+        id: randomUUID(),
+        projectId: project.id,
+        model: parsed.data.model ?? null,
+      });
+      const steps: RunStep[] = [];
+      for (const [ordinal, stageDef] of PIPELINE_STAGES.entries()) {
+        steps.push(
+          await insertRunStep(deps.store, {
+            id: randomUUID(),
+            runId: run.id,
+            name: stageDef.name,
+            ordinal,
+          }),
+        );
+      }
+
+      deps.launchRun({ run, steps, source, transform });
+      return reply.code(202).send({ run, steps });
+    },
+  );
+
+  // FR9/FR12 (T4.4): fetch a run's current state — the run row, its ordered steps, and any
+  // approvals currently awaiting a human. Lets a client that connects mid-run (after an approval
+  // was already requested over SSE) recover the pending gate rather than deadlock. 503 unwired
+  // store, 404 unknown run, 200 with the state.
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "project store unavailable" });
+    }
+    const state = await getRunState(deps.store, req.params.runId);
+    if (!state) {
+      return reply.code(404).send({ error: "run not found" });
+    }
+    const approvals = deps.runApprovals?.pending(req.params.runId) ?? [];
+    return reply.code(200).send({ ...state, approvals });
+  });
+
+  // FR8 (T4.4): answer a pipeline run's gated stage. The runner parked the stage on the run
+  // approval gate; a human's approve/reject here unblocks it — approve lets the tool run once,
+  // reject aborts the run. The decision is recorded to `platform.approvals` for the run's lineage
+  // (FR12). Status map: 503 unwired gate, 400 bad body, 404 no such pending request for this run,
+  // 200 the decision was applied.
+  app.post<{ Params: { runId: string; requestID: string } }>(
+    "/api/runs/:runId/approvals/:requestID",
+    async (req, reply) => {
+      if (!deps.runApprovals) {
+        return reply.code(503).send({ error: "run approval gate unavailable" });
+      }
+
+      const parsed = ApprovalDecisionSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid approval decision", details: parsed.error.issues });
+      }
+
+      // The request must be pending *and* belong to this run, so a requestID cannot be answered
+      // against the wrong run's URL.
+      const existing = deps.runApprovals.get(req.params.requestID);
+      if (!existing || existing.runId !== req.params.runId) {
+        return reply
+          .code(404)
+          .send({ error: `no pending run approval for request "${req.params.requestID}"` });
+      }
+
+      let request;
+      try {
+        request = deps.runApprovals.resolve(req.params.requestID, parsed.data.action);
+      } catch (err) {
+        if (err instanceof UnknownRunApprovalError) {
+          return reply.code(404).send({ error: err.message });
+        }
+        throw err;
+      }
+
+      // Audit the decision for the run's lineage (best-effort — a failed audit must not undo the
+      // human's answer, which the runner has already acted on).
+      if (deps.store) {
+        await recordApproval(deps.store, {
+          id: randomUUID(),
+          runId: request.runId,
+          requestId: request.requestID,
+          tool: request.tool,
+          args: JSON.stringify(request.args),
+          action: parsed.data.action,
+        });
+      }
+
+      return reply.code(200).send({
+        requestID: request.requestID,
+        action: parsed.data.action,
+        status: parsed.data.action === "approve" ? "approved" : "rejected",
+      });
     },
   );
 

@@ -1,8 +1,11 @@
-import { buildServer } from "./app.js";
+import { buildServer, type RunLauncher } from "./app.js";
 import { openStore } from "./store/duckdb.js";
 import { createDatastackOpencode } from "./opencode/client.js";
 import { createRunBridge } from "./opencode/bridge.js";
 import { createApprovalGate } from "./opencode/approvals.js";
+import { createRunApprovalGate } from "./pipeline/run-approvals.js";
+import { runPipeline } from "./pipeline/runner.js";
+import { DEFAULT_LANDING_DIR } from "./tools/land.js";
 
 /** Boot entrypoint: start the OpenCode runtime, then bind the HTTP server. */
 const PORT = Number(process.env.PORT ?? 3001);
@@ -23,6 +26,23 @@ async function main(): Promise<void> {
     onEvent: (event) => approvals.ingest(event),
     onError: (error) => console.error("run event bridge error:", error),
   });
+  // The scripted pipeline's approval gate (FR8): the runner parks gated stages here and the
+  // approvals route answers them. Distinct from the OpenCode permission gate above.
+  const runApprovals = createRunApprovalGate();
+  // Launch a run's pipeline in the background, wiring the runner's approval pauses to the run
+  // approval gate and its progress events to the SSE bridge (published on the run's channel).
+  const launchRun: RunLauncher = ({ run, steps, source, transform }) => {
+    void runPipeline({
+      store,
+      runId: run.id,
+      steps,
+      source,
+      transform,
+      landingDir: DEFAULT_LANDING_DIR,
+      approve: (request) => runApprovals.request(request),
+      emit: (event) => bridge.publish(run.id, { event: event.kind, data: event }),
+    }).catch((error) => console.error(`pipeline run ${run.id} failed:`, error));
+  };
   const app = buildServer({
     opencode: runtime.client,
     planner: runtime.client,
@@ -30,6 +50,8 @@ async function main(): Promise<void> {
     dqGenerator: runtime.client,
     bridge,
     approvals,
+    runApprovals,
+    launchRun,
     store,
   });
 

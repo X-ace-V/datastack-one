@@ -200,6 +200,34 @@ describe("createRunBridge", () => {
     await bridge.close();
   });
 
+  it("publish() pushes an application frame to a run's subscribers only", async () => {
+    const src = makeEventStream();
+    const bridge = createRunBridge(mockClient(src.stream));
+    const a: string[] = [];
+    const b: string[] = [];
+    bridge.subscribe("run_A", (f) => a.push(f));
+    bridge.subscribe("run_B", (f) => b.push(f));
+
+    bridge.publish("run_A", {
+      event: "step.status",
+      data: { kind: "step.status", runId: "run_A", name: "land", status: "running" },
+    });
+
+    // Only run_A's subscriber receives it, framed as a valid SSE event.
+    expect(b).toHaveLength(0);
+    expect(a).toHaveLength(1);
+    expect(a[0]).toContain("event: step.status\n");
+    expect(a[0]).toContain(
+      'data: {"kind":"step.status","runId":"run_A","name":"land","status":"running"}',
+    );
+    expect(a[0]!.endsWith("\n\n")).toBe(true);
+
+    // Publishing to a run with no subscribers is a no-op.
+    expect(() => bridge.publish("run_none", { data: {} })).not.toThrow();
+
+    await bridge.close();
+  });
+
   it("observes every raw event via onEvent before progress filtering", async () => {
     const src = makeEventStream();
     const seen: string[] = [];

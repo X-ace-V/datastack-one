@@ -1,0 +1,195 @@
+import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
+import type { WarehouseStore } from "../store/duckdb.js";
+import type { Source } from "../core/sources.js";
+import type { Transform } from "../core/transform.js";
+import type { ApprovalAction } from "../core/approvals.js";
+import {
+  PIPELINE_STAGES,
+  type RunApprovalRequest,
+  type RunEvent,
+  type RunState,
+  type RunStep,
+} from "../core/run.js";
+import { safeDatasetName } from "../core/landing.js";
+import { landParquet } from "../tools/land.js";
+import { loadWarehouse } from "../tools/warehouse.js";
+import { runTransform } from "../tools/transform.js";
+import {
+  completeRunStep,
+  getRunState,
+  startRunStep,
+  updateRunStatus,
+} from "../store/runs.js";
+
+/**
+ * The scripted pipeline runner (TASKS T4.4, PRD FR8/FR9, ARCHITECTURE §3.3, §4). It drives the
+ * run through its ordered stages deterministically — Extract → Land → Load → Transform, every
+ * stage whose tool exists today (the DQ and Publish stages join when T5.1/T5.2 land their tools).
+ * Each stage's status is persisted to `platform.run_steps` and emitted for the SSE stream (FR9);
+ * before every `ask` tool (land/load/transform) the runner parks on {@link RunPipelineDeps.approve}
+ * and does not execute until a human approves, so nothing writes or executes unapproved (FR8). A
+ * reject aborts the run. An I/O module (DuckDB via the tools + the run store), so it lives under
+ * `server/pipeline`; the schemas and stage list are the pure {@link file://../core/run.ts}.
+ */
+
+/** Everything the runner needs to execute one run to completion. */
+export interface RunPipelineDeps {
+  /** Warehouse store — the tools and the run-state persistence both use it. */
+  store: WarehouseStore;
+  /** The already-created run's id. */
+  runId: string;
+  /** The already-created, pending run steps (one per {@link PIPELINE_STAGES} entry). */
+  steps: RunStep[];
+  /** The resolved source whose CSV is landed (its `path` is read). */
+  source: Source;
+  /** The reviewed transform (SQL + target table) to execute in the Transform stage. */
+  transform: Transform;
+  /** Landing root the land stage writes Parquet under. */
+  landingDir: string;
+  /** Ingestion date to partition under; defaults to today (UTC) when omitted. */
+  ingestionDate?: string;
+  /** Called before each gated stage; resolves to the human's decision. Reject aborts the run. */
+  approve: (request: RunApprovalRequest) => Promise<ApprovalAction>;
+  /** Optional sink for run-progress events (wired to the SSE bridge in production). */
+  emit?: (event: RunEvent) => void;
+}
+
+/** Internal marker distinguishing a human rejection from a technical stage failure. */
+class StageRejectedError extends Error {
+  constructor(tool: string) {
+    super(`${tool} was rejected at the approval gate`);
+    this.name = "StageRejectedError";
+  }
+}
+
+/**
+ * Execute the run. Returns the final {@link RunState} (persisted run + steps). The run's status
+ * ends `success` when every stage passed, `rejected` when a human denied a gated stage, or
+ * `failed` when a stage errored. Never throws for an expected stage failure/rejection — those are
+ * recorded as run/step state — so a background caller can `void` it safely; it only rejects if the
+ * store itself is unreachable.
+ */
+export async function runPipeline(deps: RunPipelineDeps): Promise<RunState> {
+  const { store, runId } = deps;
+  const emit = (event: RunEvent): void => deps.emit?.(event);
+  const stepByName = new Map(deps.steps.map((step) => [step.name, step]));
+
+  /** Run one stage: mark it running, execute `body`, then record success/failure + emit both. */
+  async function stage(name: string, body: () => Promise<string>): Promise<void> {
+    const step = stepByName.get(name);
+    if (!step) throw new Error(`run ${runId} is missing the "${name}" step`);
+    await startRunStep(store, step.id);
+    emit({ kind: "step.status", runId, stepId: step.id, name, status: "running", detail: null });
+    try {
+      const detail = await body();
+      await completeRunStep(store, step.id, "success", detail);
+      emit({ kind: "step.status", runId, stepId: step.id, name, status: "success", detail });
+    } catch (err) {
+      const detail =
+        err instanceof StageRejectedError
+          ? "rejected by human at the approval gate"
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      await completeRunStep(store, step.id, "failed", detail);
+      emit({ kind: "step.status", runId, stepId: step.id, name, status: "failed", detail });
+      throw err;
+    }
+  }
+
+  /** Park a gated stage on the approval gate; throw {@link StageRejectedError} if denied. */
+  async function gate(
+    step: RunStep,
+    tool: string,
+    summary: string,
+    sql: string | null,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    const request: RunApprovalRequest = {
+      requestID: randomUUID(),
+      runId,
+      stepId: step.id,
+      stepName: step.name,
+      tool,
+      summary,
+      sql,
+      args,
+    };
+    emit({ kind: "approval.requested", runId, request });
+    const action = await deps.approve(request);
+    emit({ kind: "approval.resolved", runId, requestID: request.requestID, action });
+    if (action === "reject") throw new StageRejectedError(tool);
+  }
+
+  await updateRunStatus(store, runId, "running");
+  emit({ kind: "run.status", runId, status: "running" });
+
+  const dataset = safeDatasetName(deps.source.originalFilename ?? deps.source.id);
+  let landingPath: string | undefined;
+
+  try {
+    // Extract — read-only: confirm the uploaded CSV is present and readable, count its rows.
+    await stage("extract", async () => {
+      const rows = await store.all(
+        `SELECT count(*)::BIGINT AS n FROM read_csv_auto(?)`,
+        [deps.source.path],
+      );
+      const n = Number(rows[0]?.n ?? 0);
+      return `read ${n} rows from ${basename(deps.source.path)}`;
+    });
+
+    // Land — gated: write the raw CSV to landing as partitioned Parquet.
+    await stage("land", async () => {
+      const step = stepByName.get("land")!;
+      await gate(step, "land_parquet", `Land ${dataset} as ingestion-date-partitioned Parquet`, null, {
+        sourcePath: deps.source.path,
+        dataset,
+        ingestionDate: deps.ingestionDate ?? null,
+      });
+      const res = await landParquet(store, {
+        landingDir: deps.landingDir,
+        sourcePath: deps.source.path,
+        dataset,
+        ingestionDate: deps.ingestionDate,
+      });
+      landingPath = res.landingPath;
+      return `landed ${res.rowCount} rows → ${res.partitionPath}`;
+    });
+
+    // Load — gated: materialize the landed Parquet into raw.source.
+    await stage("load", async () => {
+      const step = stepByName.get("load")!;
+      if (!landingPath) throw new Error("no landed Parquet to load");
+      await gate(step, "load_warehouse", `Load landed Parquet into raw.source`, null, {
+        landingPath,
+      });
+      const res = await loadWarehouse(store, { landingPath });
+      return `loaded ${res.rowCount} rows → ${res.qualifiedTable}`;
+    });
+
+    // Transform — gated: execute the reviewed SQL into marts. The exact SQL is shown for approval.
+    await stage("transform", async () => {
+      const step = stepByName.get("transform")!;
+      await gate(step, "run_transform", `Execute the reviewed transform SQL into marts`, deps.transform.sql, {
+        targetTable: deps.transform.targetTable,
+      });
+      const res = await runTransform(store, {
+        sql: deps.transform.sql,
+        targetTable: deps.transform.targetTable,
+      });
+      return `materialized ${res.rowCount} rows → ${res.qualifiedTable}`;
+    });
+
+    await updateRunStatus(store, runId, "success");
+    emit({ kind: "run.status", runId, status: "success" });
+  } catch (err) {
+    const status = err instanceof StageRejectedError ? "rejected" : "failed";
+    await updateRunStatus(store, runId, status);
+    emit({ kind: "run.status", runId, status });
+  }
+
+  const state = await getRunState(store, runId);
+  if (!state) throw new Error(`run ${runId} vanished during execution`);
+  return state;
+}
