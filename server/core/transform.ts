@@ -176,3 +176,37 @@ export function parseTransformResponse(text: string): Transform {
   }
   return parsed.data;
 }
+
+// --- Execution (the `run_transform` tool, T4.3 / FR6) -----------------------
+//
+// After the generated {@link Transform} SQL has been reviewed and approved (FR8), the
+// `run_transform` tool executes it, materializing the final business table. That is the
+// riskiest tool (it runs arbitrary reviewed SQL), so it is permission `ask`. The pure parts
+// below — the target schema and the result shape — mirror {@link file://./warehouse.ts}'s
+// load contract; the DuckDB execution itself lives in {@link file://../tools/transform.ts}.
+
+/**
+ * The schema `run_transform` materializes into. The transform SQL creates
+ * `marts.<targetTable>` (the prompt in {@link buildTransformPrompt} pins this convention), so
+ * the tool reads the result back from `marts` to report its row count — which also enforces
+ * that the reviewed SQL actually produced the marts table it claimed rather than writing
+ * elsewhere.
+ */
+export const MARTS_SCHEMA = "marts";
+
+/**
+ * Result of a successful `run_transform` execution (FR6). Like {@link file://./warehouse.ts}'s
+ * `LoadResult`, `rowCount` is read back from the materialized `marts` table (not echoed from
+ * the SQL) so it proves the transform actually persisted rows.
+ */
+export const RunTransformResultSchema = z.object({
+  /** Always `marts` — the ELT layer the transform writes its final table into. */
+  schema: z.literal(MARTS_SCHEMA),
+  /** Sanitized unqualified name of the created marts table. */
+  table: z.string().min(1),
+  /** Fully-qualified `marts.<table>` name the serving stage reads from. */
+  qualifiedTable: z.string().min(1),
+  /** Rows in the created table, counted by reading it back. */
+  rowCount: z.number().int().nonnegative(),
+});
+export type RunTransformResult = z.infer<typeof RunTransformResultSchema>;

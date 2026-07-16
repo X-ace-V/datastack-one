@@ -6,6 +6,8 @@ import {
   extractJsonObject,
   parseModelRef,
   parseTransformResponse,
+  RunTransformResultSchema,
+  MARTS_SCHEMA,
   SOURCE_TABLE,
 } from "./transform.js";
 import { buildSourceProfile, type SourceProfile } from "./profile.js";
@@ -170,6 +172,39 @@ describe("parseTransformResponse", () => {
   it("rejects non-JSON model chatter", () => {
     expect(() => parseTransformResponse("I could not produce SQL.")).toThrow(
       TransformParseError,
+    );
+  });
+});
+
+describe("RunTransformResultSchema (run_transform execution contract)", () => {
+  const VALID_RESULT = {
+    schema: MARTS_SCHEMA,
+    table: "branch_balance_totals",
+    qualifiedTable: "marts.branch_balance_totals",
+    rowCount: 2,
+  };
+
+  it("accepts a complete marts result", () => {
+    expect(RunTransformResultSchema.parse(VALID_RESULT)).toEqual(VALID_RESULT);
+  });
+
+  it("pins the schema to marts (run_transform never writes elsewhere)", () => {
+    expect(MARTS_SCHEMA).toBe("marts");
+    expect(RunTransformResultSchema.safeParse({ ...VALID_RESULT, schema: "raw" }).success).toBe(
+      false,
+    );
+  });
+
+  it("rejects an empty table name", () => {
+    expect(RunTransformResultSchema.safeParse({ ...VALID_RESULT, table: "" }).success).toBe(false);
+  });
+
+  it("rejects a negative or fractional row count", () => {
+    expect(RunTransformResultSchema.safeParse({ ...VALID_RESULT, rowCount: -1 }).success).toBe(
+      false,
+    );
+    expect(RunTransformResultSchema.safeParse({ ...VALID_RESULT, rowCount: 1.5 }).success).toBe(
+      false,
     );
   });
 });
