@@ -1,0 +1,39 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# local data plane (never commit user data / the warehouse) — fixtures/ IS tracked
+data/
+!fixtures/
+
+# secrets & env
+.env
+.env.*
+!.env.example
+
+# internal build/loop harness — keep local, out of the repo
+LOOP.md
+loop.sh
+TASKS.md
+PROGRESS.md
+PRD_DataStack_One.md
+
+# loop + logs
+loop-output.log
+*.log
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# test / coverage
+coverage/
+.vitest/
