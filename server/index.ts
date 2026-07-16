@@ -27,6 +27,7 @@ async function main(): Promise<void> {
     opencode: runtime.client,
     planner: runtime.client,
     transformer: runtime.client,
+    dqGenerator: runtime.client,
     bridge,
     approvals,
     store,

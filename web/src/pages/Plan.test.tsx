@@ -248,6 +248,41 @@ describe("plan rules page", () => {
     expect(JSON.parse(String(postCalls[0]?.body))).toEqual({});
   });
 
+  it("generates DQ checks and renders their types, columns and descriptions", async () => {
+    const postCalls: PostCall[] = [];
+    const dq = {
+      targetTable: "raw.source",
+      checks: [
+        { name: "rows present", type: "row_count", column: null, description: "at least one row" },
+        { name: "id not null", type: "not_null", column: "loan_id", description: "loan_id never null" },
+        { name: "branch present", type: "schema", column: "branch", description: "branch column exists" },
+        { name: "recent", type: "freshness", column: "opened_at", description: "opened_at is recent" },
+      ],
+    };
+    installFetch({
+      projects: [makeProject()],
+      currentRules: null,
+      onPost: () => jsonResponse(200, { dq, artifact: makeArtifact({ kind: "dq_spec" }) }),
+      postCalls,
+    });
+    renderPage();
+
+    const generate = await screen.findByRole("button", { name: /generate dq checks/i });
+    fireEvent.click(generate);
+
+    const region = await screen.findByRole("region", { name: /generated dq checks/i });
+    expect(region.textContent).toContain("raw.source");
+    expect(region.textContent).toContain("row_count");
+    expect(region.textContent).toContain("freshness");
+    expect(region.textContent).toContain("loan_id");
+    expect(region.textContent).toContain("opened_at is recent");
+
+    // Exactly one JSON POST to the selected project's dq route.
+    expect(postCalls).toHaveLength(1);
+    expect(postCalls[0]?.url).toBe("/api/projects/p-1/dq");
+    expect(JSON.parse(String(postCalls[0]?.body))).toEqual({});
+  });
+
   it("surfaces a plan-generation error", async () => {
     installFetch({
       projects: [makeProject()],

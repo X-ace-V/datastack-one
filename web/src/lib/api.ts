@@ -255,6 +255,47 @@ export async function generateTransform(
   return (await res.json()) as TransformResult;
 }
 
+/** One generated data-quality check, mirroring the backend `DqCheckSchema` (FR7). */
+export interface DqCheck {
+  name: string;
+  type: "row_count" | "not_null" | "schema" | "freshness";
+  column: string | null;
+  description: string;
+}
+
+/** A generated data-quality spec, mirroring the backend `DqSpecSchema` (FR7). */
+export interface DqSpec {
+  targetTable: string;
+  checks: DqCheck[];
+}
+
+/** Result of `POST /api/projects/:id/dq`: the generated DQ spec and its persisted artifact. */
+export interface DqResult {
+  dq: DqSpec;
+  artifact: Artifact;
+}
+
+/**
+ * Generate the data-quality checks for a project (FR7). Drives the constrained DQ stage on the
+ * backend, which profiles the source, reads the current rules, prompts the agent for ≥3
+ * structured checks (row count, not-null, schema, freshness) and persists them as a `dq_spec`
+ * artifact. An optional `model` (`provider/model`) overrides the default free model for this run.
+ */
+export async function generateDq(
+  projectId: string,
+  options: { sourceId?: string; model?: string } = {},
+): Promise<DqResult> {
+  const res = await fetch(`/api/projects/${projectId}/dq`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(options),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to generate DQ checks"));
+  }
+  return (await res.json()) as DqResult;
+}
+
 /** Upload a rules document file (FR6) as multipart and return the persisted `rules` artifact. */
 export async function uploadRules(projectId: string, file: File): Promise<Artifact> {
   const form = new FormData();

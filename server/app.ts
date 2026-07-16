@@ -8,6 +8,7 @@ import { ProfileRequestSchema } from "./core/profile.js";
 import { RulesInputSchema } from "./core/artifacts.js";
 import { PlanRequestSchema, PlanParseError } from "./core/plan.js";
 import { TransformRequestSchema, TransformParseError } from "./core/transform.js";
+import { DqRequestSchema, DqParseError } from "./core/dq.js";
 import { isCsvFilename } from "./core/sources.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
 import { runPlanStage, PlanRuntimeError, type PlanClient } from "./pipeline/plan.js";
@@ -16,6 +17,7 @@ import {
   TransformRuntimeError,
   type TransformClient,
 } from "./pipeline/transform.js";
+import { runDqStage, DqRuntimeError, type DqClient } from "./pipeline/dq.js";
 import type { RunBridge } from "./opencode/bridge.js";
 import type { WarehouseStore } from "./store/duckdb.js";
 import { getProject, insertProject, listProjects } from "./store/projects.js";
@@ -60,6 +62,12 @@ export interface ServerDeps {
    * tests can mock just the session and a health-only boot (no runtime) reports 503.
    */
   transformer?: TransformClient;
+  /**
+   * OpenCode client slice used by the DQ stage (`POST /api/projects/:id/dq`, FR7) — the same
+   * `session` surface as {@link transformer}, injected separately so its route's tests can mock
+   * just the session and a health-only boot (no runtime) reports 503.
+   */
+  dqGenerator?: DqClient;
   /**
    * Bridge relaying OpenCode progress events to SSE (FR9). Absent → the run-events route
    * reports 503, since a health-only boot has no runtime to stream from.
@@ -461,6 +469,92 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         content: JSON.stringify(transform, null, 2),
       });
       return reply.code(200).send({ transform, artifact });
+    },
+  );
+
+  // FR7: generate the data-quality checks for a project. Profiles the source for schema context
+  // (the named `sourceId`, else the project's newest upload), reads the current rules doc if any,
+  // then drives one constrained, tool-free `session.prompt` that returns ≥3 structured checks
+  // (row count, not-null, schema, freshness) against the loaded source table. The validated spec
+  // is persisted as a `dq_spec` artifact via `write_artifact` so the Review step can render it;
+  // executing the checks and blocking publish on failure is the later `run_dq_check` tool (T5.1).
+  // Status map: 503 unwired store/dqGenerator, 400 bad body / no source, 404 unknown project or
+  // cross-project source, 422 unreadable CSV or a model output that is not a valid spec, 502 the
+  // agent runtime failed, 200 success.
+  app.post<{ Params: { id: string } }>(
+    "/api/projects/:id/dq",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+      if (!deps.dqGenerator) {
+        return reply.code(503).send({ error: "DQ runtime unavailable" });
+      }
+
+      const parsed = DqRequestSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid DQ request", details: parsed.error.issues });
+      }
+
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+
+      // Resolve the source to profile: the named one, or the newest upload for the project.
+      let source;
+      if (parsed.data.sourceId) {
+        source = await getSource(deps.store, parsed.data.sourceId);
+        if (!source || source.projectId !== project.id) {
+          return reply.code(404).send({ error: "source not found" });
+        }
+      } else {
+        const sources = await listSources(deps.store, project.id);
+        source = sources[0];
+        if (!source) {
+          return reply.code(400).send({ error: "no source to generate checks from" });
+        }
+      }
+
+      let profile;
+      try {
+        profile = await profileSource(deps.store, source.path);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(422).send({ error: `could not profile source: ${message}` });
+      }
+
+      const rulesArtifact = await getLatestArtifactByKind(deps.store, project.id, "rules");
+
+      let dq;
+      try {
+        dq = await runDqStage(deps.dqGenerator, {
+          profile,
+          rules: rulesArtifact?.content ?? null,
+          model: parsed.data.model,
+        });
+      } catch (err) {
+        if (err instanceof DqParseError) {
+          return reply
+            .code(422)
+            .send({ error: `could not generate DQ checks: ${err.message}` });
+        }
+        if (err instanceof DqRuntimeError) {
+          return reply.code(502).send({ error: err.message });
+        }
+        throw err;
+      }
+
+      const artifact = await writeArtifact(deps.store, {
+        dir: artifactsDir,
+        projectId: project.id,
+        kind: "dq_spec",
+        name: "dq.json",
+        content: JSON.stringify(dq, null, 2),
+      });
+      return reply.code(200).send({ dq, artifact });
     },
   );
 

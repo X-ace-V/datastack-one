@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { StepShell } from "../components/StepShell";
 import {
+  generateDq,
   generatePlan,
   generateTransform,
   getRules,
@@ -9,6 +10,7 @@ import {
   saveRules,
   uploadRules,
   type Artifact,
+  type DqSpec,
   type Plan,
   type Project,
   type Transform,
@@ -34,6 +36,8 @@ export function PlanPage() {
   const [planning, setPlanning] = useState(false);
   const [transform, setTransform] = useState<Transform | null>(null);
   const [transforming, setTransforming] = useState(false);
+  const [dq, setDq] = useState<DqSpec | null>(null);
+  const [generatingDq, setGeneratingDq] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Load projects on mount and default the selection to the newest one.
@@ -60,6 +64,7 @@ export function PlanPage() {
     setRulesText("");
     setPlan(null);
     setTransform(null);
+    setDq(null);
     if (!projectId) return;
     let active = true;
     getRules(projectId)
@@ -148,6 +153,24 @@ export function PlanPage() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setTransforming(false);
+    }
+  }
+
+  async function handleGenerateDq() {
+    if (!projectId) {
+      setError("Select a project first.");
+      return;
+    }
+    setGeneratingDq(true);
+    setError(null);
+    setDq(null);
+    try {
+      const result = await generateDq(projectId);
+      setDq(result.dq);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGeneratingDq(false);
     }
   }
 
@@ -344,6 +367,46 @@ export function PlanPage() {
                   </ul>
                 </div>
               )}
+            </div>
+          )}
+        </div>
+
+        <div className="border-t border-slate-200 pt-4">
+          <h3 className="text-sm font-medium text-slate-700">Data-quality checks</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            The agent proposes at least three checks — row count, not-null, schema and freshness —
+            to run against the loaded source before publishing. Any failing check blocks publish.
+          </p>
+          <button
+            type="button"
+            onClick={() => void handleGenerateDq()}
+            disabled={generatingDq || !projectId}
+            className="mt-2 rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {generatingDq ? "Generating…" : "Generate DQ checks"}
+          </button>
+
+          {dq && (
+            <div role="region" aria-label="Generated DQ checks" className="mt-4 space-y-3">
+              <p className="text-xs font-medium text-slate-500">
+                Target table: <span className="text-slate-800">{dq.targetTable}</span>
+              </p>
+              <ul className="space-y-2 text-sm">
+                {dq.checks.map((check, i) => (
+                  <li key={i} className="rounded-md border border-slate-200 p-2">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700">
+                        {check.type}
+                      </span>
+                      <span className="font-medium text-slate-800">{check.name}</span>
+                      {check.column && (
+                        <span className="text-xs text-slate-500">on {check.column}</span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-slate-700">{check.description}</p>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </div>
