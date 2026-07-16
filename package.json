@@ -1,0 +1,24 @@
+{
+  "name": "datastack-one",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DataStack One — local-first agentic data-platform bootstrap MVP",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "dev": "concurrently -n server,web -c blue,magenta \"npm:dev:server\" \"npm:dev:web\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}
