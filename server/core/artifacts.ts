@@ -68,6 +68,21 @@ export const RulesResponseSchema = z.object({
 export type RulesResponse = z.infer<typeof RulesResponseSchema>;
 
 /**
+ * Response body for `GET /api/projects/:id/artifacts` — the newest artifact of each kind the
+ * Review step (FR3/FR6/FR7) inspects before execution: the architecture plan, the transform
+ * SQL, the DDL, and the DQ spec. Each is `null` until its generation stage has run, so the
+ * review UI can show what is still missing. The raw artifacts are returned (content included)
+ * so the client renders each from its stored payload without a second round-trip.
+ */
+export const ReviewArtifactsResponseSchema = z.object({
+  plan: ArtifactSchema.nullable(),
+  transform: ArtifactSchema.nullable(),
+  ddl: ArtifactSchema.nullable(),
+  dq: ArtifactSchema.nullable(),
+});
+export type ReviewArtifactsResponse = z.infer<typeof ReviewArtifactsResponseSchema>;
+
+/**
  * Body of `POST /api/projects/:id/rules` when the rules arrive as JSON from the UI textarea
  * (as opposed to a multipart file upload). `.trim()` before `.min(1)` rejects a
  * whitespace-only submission, so an empty rules doc can never be stored.

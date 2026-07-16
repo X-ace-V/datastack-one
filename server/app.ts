@@ -636,6 +636,31 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     },
   );
 
+  // FR3/FR6/FR7: fetch the generated artifacts for the Review step (T3.5) — the newest
+  // architecture plan, transform SQL, DDL, and DQ spec — so a human can inspect everything the
+  // agent produced before approving any execution. Each is the latest of its kind, or null if
+  // that generation stage has not run yet, so the UI can show what is still outstanding.
+  // 503 unwired store, 404 unknown project, 200 with the four (possibly null) artifacts.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/artifacts",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+      const [plan, transform, ddl, dq] = await Promise.all([
+        getLatestArtifactByKind(deps.store, project.id, "plan"),
+        getLatestArtifactByKind(deps.store, project.id, "transform_sql"),
+        getLatestArtifactByKind(deps.store, project.id, "ddl"),
+        getLatestArtifactByKind(deps.store, project.id, "dq_spec"),
+      ]);
+      return reply.code(200).send({ plan, transform, ddl, dq });
+    },
+  );
+
   // FR9: stream a run's progress (agent reasoning, tool calls, per-stage status) to the UI
   // as Server-Sent Events. The bridge fans the OpenCode event stream out per run; here we
   // just open a long-lived SSE response and forward each frame the bridge hands us until

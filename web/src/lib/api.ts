@@ -296,6 +296,32 @@ export async function generateDq(
   return (await res.json()) as DqResult;
 }
 
+/**
+ * The generated artifacts the Review step inspects (FR3/FR6/FR7), mirroring the backend
+ * `ReviewArtifactsResponseSchema`. Each is the newest artifact of its kind, or `null` until
+ * that generation stage has run. The structured payloads (plan/transform/dq) are stored as
+ * JSON in each artifact's `content`; the DDL artifact's `content` is raw SQL.
+ */
+export interface ReviewArtifacts {
+  plan: Artifact | null;
+  transform: Artifact | null;
+  ddl: Artifact | null;
+  dq: Artifact | null;
+}
+
+/**
+ * Fetch a project's latest generated artifacts (plan, transform SQL, DDL, DQ spec) for the
+ * Review step. Returns each as its persisted artifact (content included) so the page can
+ * render every payload without a further round-trip; a kind not yet generated comes back null.
+ */
+export async function getReviewArtifacts(projectId: string): Promise<ReviewArtifacts> {
+  const res = await fetch(`/api/projects/${projectId}/artifacts`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load artifacts"));
+  }
+  return (await res.json()) as ReviewArtifacts;
+}
+
 /** Upload a rules document file (FR6) as multipart and return the persisted `rules` artifact. */
 export async function uploadRules(projectId: string, file: File): Promise<Artifact> {
   const form = new FormData();
