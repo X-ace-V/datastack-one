@@ -33,4 +33,4 @@ Authoritative references: `PRD.md` (contract) · `ARCHITECTURE.md` (design) ·
 
 ## Lessons learned (append, never repeat)
 
-_(none yet — the first corrected assumption goes here, one line each)_
+- `TASKS.md`/`PROGRESS.md`/`LOOP.md`/`loop.sh` are gitignored (internal loop state) — edits to them won't appear in `git status`/`git add`; commits contain code only. That's by design, not a bug.
