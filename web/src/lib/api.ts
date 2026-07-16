@@ -220,6 +220,41 @@ export async function generatePlan(
   return (await res.json()) as PlanResult;
 }
 
+/** A generated transformation, mirroring the backend `TransformSchema` (FR6). */
+export interface Transform {
+  sql: string;
+  targetTable: string;
+  assumptions: string[];
+  questions: string[];
+}
+
+/** Result of `POST /api/projects/:id/transform`: the generated transform and its artifact. */
+export interface TransformResult {
+  transform: Transform;
+  artifact: Artifact;
+}
+
+/**
+ * Generate the transformation SQL for a project (FR6). Drives the constrained transform stage
+ * on the backend, which profiles the source, reads the current rules, prompts the agent for
+ * structured SQL plus the assumptions/questions it surfaced, and persists it as a
+ * `transform_sql` artifact. An optional `model` (`provider/model`) overrides the free default.
+ */
+export async function generateTransform(
+  projectId: string,
+  options: { sourceId?: string; model?: string } = {},
+): Promise<TransformResult> {
+  const res = await fetch(`/api/projects/${projectId}/transform`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(options),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to generate transform"));
+  }
+  return (await res.json()) as TransformResult;
+}
+
 /** Upload a rules document file (FR6) as multipart and return the persisted `rules` artifact. */
 export async function uploadRules(projectId: string, file: File): Promise<Artifact> {
   const form = new FormData();

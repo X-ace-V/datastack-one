@@ -26,6 +26,7 @@ async function main(): Promise<void> {
   const app = buildServer({
     opencode: runtime.client,
     planner: runtime.client,
+    transformer: runtime.client,
     bridge,
     approvals,
     store,

@@ -7,9 +7,15 @@ import { CreateProjectRequestSchema } from "./core/projects.js";
 import { ProfileRequestSchema } from "./core/profile.js";
 import { RulesInputSchema } from "./core/artifacts.js";
 import { PlanRequestSchema, PlanParseError } from "./core/plan.js";
+import { TransformRequestSchema, TransformParseError } from "./core/transform.js";
 import { isCsvFilename } from "./core/sources.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
 import { runPlanStage, PlanRuntimeError, type PlanClient } from "./pipeline/plan.js";
+import {
+  runTransformStage,
+  TransformRuntimeError,
+  type TransformClient,
+} from "./pipeline/transform.js";
 import type { RunBridge } from "./opencode/bridge.js";
 import type { WarehouseStore } from "./store/duckdb.js";
 import { getProject, insertProject, listProjects } from "./store/projects.js";
@@ -48,6 +54,12 @@ export interface ServerDeps {
    * health-only boot (no runtime) reports 503 rather than pretending to plan.
    */
   planner?: PlanClient;
+  /**
+   * OpenCode client slice used by the transform stage (`POST /api/projects/:id/transform`,
+   * FR6) — the same `session` surface as {@link planner}, injected separately so its route's
+   * tests can mock just the session and a health-only boot (no runtime) reports 503.
+   */
+  transformer?: TransformClient;
   /**
    * Bridge relaying OpenCode progress events to SSE (FR9). Absent → the run-events route
    * reports 503, since a health-only boot has no runtime to stream from.
@@ -356,6 +368,99 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         content: JSON.stringify(plan, null, 2),
       });
       return reply.code(200).send({ plan, artifact });
+    },
+  );
+
+  // FR6: generate the transformation SQL for a project. Profiles the source for schema context
+  // (the named `sourceId`, else the project's newest upload), reads the current rules doc, then
+  // drives one constrained, tool-free `session.prompt` that returns structured SQL plus the
+  // assumptions and clarifying questions the agent surfaced. The validated transform is
+  // persisted as a `transform_sql` artifact via `write_artifact` so the Review step can render
+  // it for human approval before it ever runs. Rules are required — SQL is generated from them,
+  // so a project with none on file is a 400, not an empty generation. Status map: 503 unwired
+  // store/transformer, 400 bad body / no source / no rules, 404 unknown project or cross-project
+  // source, 422 unreadable CSV or a model output that is not a valid transform, 502 the agent
+  // runtime failed, 200 success.
+  app.post<{ Params: { id: string } }>(
+    "/api/projects/:id/transform",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+      if (!deps.transformer) {
+        return reply.code(503).send({ error: "transform runtime unavailable" });
+      }
+
+      const parsed = TransformRequestSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid transform request", details: parsed.error.issues });
+      }
+
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+
+      // Resolve the source to profile: the named one, or the newest upload for the project.
+      let source;
+      if (parsed.data.sourceId) {
+        source = await getSource(deps.store, parsed.data.sourceId);
+        if (!source || source.projectId !== project.id) {
+          return reply.code(404).send({ error: "source not found" });
+        }
+      } else {
+        const sources = await listSources(deps.store, project.id);
+        source = sources[0];
+        if (!source) {
+          return reply.code(400).send({ error: "no source to transform" });
+        }
+      }
+
+      // The transform is generated *from* the rules, so they must be on file first.
+      const rulesArtifact = await getLatestArtifactByKind(deps.store, project.id, "rules");
+      if (!rulesArtifact?.content) {
+        return reply
+          .code(400)
+          .send({ error: "no transformation rules on file; submit rules first" });
+      }
+
+      let profile;
+      try {
+        profile = await profileSource(deps.store, source.path);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(422).send({ error: `could not profile source: ${message}` });
+      }
+
+      let transform;
+      try {
+        transform = await runTransformStage(deps.transformer, {
+          profile,
+          rules: rulesArtifact.content,
+          model: parsed.data.model,
+        });
+      } catch (err) {
+        if (err instanceof TransformParseError) {
+          return reply
+            .code(422)
+            .send({ error: `could not generate the transform: ${err.message}` });
+        }
+        if (err instanceof TransformRuntimeError) {
+          return reply.code(502).send({ error: err.message });
+        }
+        throw err;
+      }
+
+      const artifact = await writeArtifact(deps.store, {
+        dir: artifactsDir,
+        projectId: project.id,
+        kind: "transform_sql",
+        name: "transform.json",
+        content: JSON.stringify(transform, null, 2),
+      });
+      return reply.code(200).send({ transform, artifact });
     },
   );
 

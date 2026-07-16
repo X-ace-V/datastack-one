@@ -217,6 +217,37 @@ describe("plan rules page", () => {
     expect(JSON.parse(String(postCalls[0]?.body))).toEqual({});
   });
 
+  it("generates a transform and renders its SQL, assumptions and questions", async () => {
+    const postCalls: PostCall[] = [];
+    const transform = {
+      sql: "CREATE OR REPLACE TABLE marts.loan_summary AS SELECT branch, sum(balance) FROM raw.source GROUP BY branch;",
+      targetTable: "loan_summary",
+      assumptions: ["A null balance is treated as zero."],
+      questions: ["Should closed loans be excluded?"],
+    };
+    installFetch({
+      projects: [makeProject()],
+      currentRules: null,
+      onPost: () =>
+        jsonResponse(200, { transform, artifact: makeArtifact({ kind: "transform_sql" }) }),
+      postCalls,
+    });
+    renderPage();
+
+    const generate = await screen.findByRole("button", { name: /generate transform sql/i });
+    fireEvent.click(generate);
+
+    const region = await screen.findByRole("region", { name: /generated transform/i });
+    expect(region.textContent).toContain("marts.loan_summary");
+    expect(region.textContent).toContain("A null balance is treated as zero.");
+    expect(region.textContent).toContain("Should closed loans be excluded?");
+
+    // Exactly one JSON POST to the selected project's transform route.
+    expect(postCalls).toHaveLength(1);
+    expect(postCalls[0]?.url).toBe("/api/projects/p-1/transform");
+    expect(JSON.parse(String(postCalls[0]?.body))).toEqual({});
+  });
+
   it("surfaces a plan-generation error", async () => {
     installFetch({
       projects: [makeProject()],

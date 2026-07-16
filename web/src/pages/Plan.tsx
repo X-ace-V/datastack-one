@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { StepShell } from "../components/StepShell";
 import {
   generatePlan,
+  generateTransform,
   getRules,
   listProjects,
   saveRules,
@@ -10,6 +11,7 @@ import {
   type Artifact,
   type Plan,
   type Project,
+  type Transform,
 } from "../lib/api";
 
 /**
@@ -30,6 +32,8 @@ export function PlanPage() {
   const [saved, setSaved] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [planning, setPlanning] = useState(false);
+  const [transform, setTransform] = useState<Transform | null>(null);
+  const [transforming, setTransforming] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Load projects on mount and default the selection to the newest one.
@@ -55,6 +59,7 @@ export function PlanPage() {
     setCurrent(null);
     setRulesText("");
     setPlan(null);
+    setTransform(null);
     if (!projectId) return;
     let active = true;
     getRules(projectId)
@@ -125,6 +130,24 @@ export function PlanPage() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setPlanning(false);
+    }
+  }
+
+  async function handleGenerateTransform() {
+    if (!projectId) {
+      setError("Select a project first.");
+      return;
+    }
+    setTransforming(true);
+    setError(null);
+    setTransform(null);
+    try {
+      const result = await generateTransform(projectId);
+      setTransform(result.transform);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTransforming(false);
     }
   }
 
@@ -272,6 +295,55 @@ export function PlanPage() {
                   </li>
                 ))}
               </ol>
+            </div>
+          )}
+        </div>
+
+        <div className="border-t border-slate-200 pt-4">
+          <h3 className="text-sm font-medium text-slate-700">Transformation SQL</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            The agent turns your rules into reviewable DuckDB SQL, surfacing the assumptions it
+            made and any clarifying questions. Nothing runs yet — you approve it first.
+          </p>
+          <button
+            type="button"
+            onClick={() => void handleGenerateTransform()}
+            disabled={transforming || !projectId}
+            className="mt-2 rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {transforming ? "Generating…" : "Generate transform SQL"}
+          </button>
+
+          {transform && (
+            <div role="region" aria-label="Generated transform" className="mt-4 space-y-3">
+              <div>
+                <p className="text-xs font-medium text-slate-500">
+                  Target table: <span className="text-slate-800">marts.{transform.targetTable}</span>
+                </p>
+                <pre className="mt-1 overflow-x-auto rounded-md bg-slate-900 p-3 font-mono text-xs text-slate-100">
+                  {transform.sql}
+                </pre>
+              </div>
+              {transform.assumptions.length > 0 && (
+                <div>
+                  <p className="text-xs font-medium text-slate-500">Assumptions</p>
+                  <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                    {transform.assumptions.map((a, i) => (
+                      <li key={i}>{a}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {transform.questions.length > 0 && (
+                <div>
+                  <p className="text-xs font-medium text-slate-500">Clarifying questions</p>
+                  <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-amber-700">
+                    {transform.questions.map((q, i) => (
+                      <li key={i}>{q}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </div>
