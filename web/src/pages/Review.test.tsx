@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ReviewPage } from "./Review";
 import type { Artifact, Project } from "../lib/api";
@@ -153,7 +153,9 @@ describe("review page", () => {
     const approve = (await screen.findByRole("button", {
       name: /approve artifacts/i,
     })) as HTMLButtonElement;
-    expect(approve.disabled).toBe(false);
+    // The button renders immediately but only enables once the artifacts finish loading; wait
+    // for that async state rather than racing it (this assertion used to flake under load).
+    await waitFor(() => expect(approve.disabled).toBe(false));
 
     // No run link until the human approves.
     expect(screen.queryByRole("link", { name: /continue to run/i })).toBeNull();
