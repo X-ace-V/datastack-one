@@ -1,7 +1,13 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
+import { ApprovalDecisionSchema } from "./core/approvals.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
 import type { RunBridge } from "./opencode/bridge.js";
+import {
+  ApprovalReplyError,
+  UnknownApprovalError,
+  type ApprovalGate,
+} from "./opencode/approvals.js";
 
 /** Backend identity, surfaced by `/api/health` so a client can confirm the target. */
 export const SERVICE_NAME = "datastack-one";
@@ -20,6 +26,11 @@ export interface ServerDeps {
    * reports 503, since a health-only boot has no runtime to stream from.
    */
   bridge?: RunBridge;
+  /**
+   * Approval gate holding pending permission requests (FR8). Absent → the approvals route
+   * reports 503, since a health-only boot has no runtime to approve against.
+   */
+  approvals?: ApprovalGate;
 }
 
 /**
@@ -83,6 +94,41 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
 
     return reply;
   });
+
+  // FR8: resolve a pending permission request. The bridge captured it from the runtime's
+  // `permission.updated` event; here a human's approve/reject is relayed back so the gated
+  // tool either runs once or is aborted. This is the only path past the approval gate.
+  app.post<{ Params: { requestID: string } }>(
+    "/api/approvals/:requestID",
+    async (req, reply) => {
+      if (!deps.approvals) {
+        return reply.code(503).send({ error: "approval gate unavailable" });
+      }
+
+      const parsed = ApprovalDecisionSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid approval decision", details: parsed.error.issues });
+      }
+
+      try {
+        const result = await deps.approvals.reply(
+          req.params.requestID,
+          parsed.data.action,
+        );
+        return reply.code(200).send(result);
+      } catch (err) {
+        if (err instanceof UnknownApprovalError) {
+          return reply.code(404).send({ error: err.message });
+        }
+        if (err instanceof ApprovalReplyError) {
+          return reply.code(502).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
 
   return app;
 }
