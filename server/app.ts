@@ -1,11 +1,16 @@
+import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
+import multipart from "@fastify/multipart";
 import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
 import { ApprovalDecisionSchema } from "./core/approvals.js";
 import { CreateProjectRequestSchema } from "./core/projects.js";
+import { isCsvFilename } from "./core/sources.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
 import type { RunBridge } from "./opencode/bridge.js";
 import type { WarehouseStore } from "./store/duckdb.js";
-import { insertProject, listProjects } from "./store/projects.js";
+import { getProject, insertProject, listProjects } from "./store/projects.js";
+import { insertSource, listSources } from "./store/sources.js";
+import { DEFAULT_UPLOADS_DIR, saveUpload } from "./store/uploads.js";
 import {
   ApprovalReplyError,
   UnknownApprovalError,
@@ -39,7 +44,15 @@ export interface ServerDeps {
    * 503, since a health-only boot has no warehouse to persist to.
    */
   store?: WarehouseStore;
+  /**
+   * Directory uploaded CSVs are written to (FR2). Defaults to {@link DEFAULT_UPLOADS_DIR};
+   * tests override it with a tmp dir so they never touch the repo's `data/`.
+   */
+  uploadsDir?: string;
 }
+
+/** Hard cap on an uploaded CSV, keeping a stray huge file from filling the disk. */
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 /**
  * Build the Fastify instance with all routes registered but not yet listening.
@@ -48,6 +61,11 @@ export interface ServerDeps {
  */
 export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   const app = Fastify({ logger: false });
+  const uploadsDir = deps.uploadsDir ?? DEFAULT_UPLOADS_DIR;
+
+  // FR2: accept CSV uploads as multipart/form-data. Registered for the whole app; only the
+  // source-upload route reads a file, and the size cap guards the disk.
+  app.register(multipart, { limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } });
 
   app.get("/api/health", async (): Promise<HealthStatus> => {
     // Build then validate against the shared contract so the route can never
@@ -98,6 +116,80 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     const projects = await listProjects(deps.store);
     return reply.code(200).send({ projects });
   });
+
+  // FR2: upload a CSV source for a project. The raw file lands under `data/uploads/` and a
+  // row is recorded in `platform.sources`; profiling (schema, row count) is a later step, so
+  // the stored row leaves those unset for now. 404 if the project is unknown, 400 for a
+  // missing/non-CSV/empty/oversized file.
+  app.post<{ Params: { id: string } }>(
+    "/api/projects/:id/source",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+      if (!req.isMultipart()) {
+        return reply.code(400).send({ error: "expected a multipart/form-data upload" });
+      }
+
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+
+      const data = await req.file();
+      if (!data) {
+        return reply.code(400).send({ error: "a CSV file is required" });
+      }
+      if (!isCsvFilename(data.filename)) {
+        return reply.code(400).send({ error: "only .csv files are supported" });
+      }
+
+      let content: Buffer;
+      try {
+        content = await data.toBuffer();
+      } catch {
+        // @fastify/multipart throws once the byte stream exceeds the configured limit.
+        return reply
+          .code(400)
+          .send({ error: "the uploaded file exceeds the size limit" });
+      }
+      if (content.length === 0) {
+        return reply.code(400).send({ error: "the uploaded file is empty" });
+      }
+
+      const sourceId = randomUUID();
+      const path = await saveUpload({
+        dir: uploadsDir,
+        projectId: project.id,
+        sourceId,
+        originalFilename: data.filename,
+        content,
+      });
+      const source = await insertSource(deps.store, {
+        id: sourceId,
+        projectId: project.id,
+        path,
+        originalFilename: data.filename,
+      });
+      return reply.code(201).send(source);
+    },
+  );
+
+  // FR2: list a project's uploaded sources so the Connect page can show what has landed.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/sources",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "project store unavailable" });
+      }
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+      const sources = await listSources(deps.store, project.id);
+      return reply.code(200).send({ sources });
+    },
+  );
 
   // FR9: stream a run's progress (agent reasoning, tool calls, per-stage status) to the UI
   // as Server-Sent Events. The bridge fans the OpenCode event stream out per run; here we

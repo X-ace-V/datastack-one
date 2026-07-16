@@ -70,6 +70,19 @@ export async function insertProject(
   return rowToProject(row);
 }
 
+/** Fetch a single project by id, or `null` if none exists. */
+export async function getProject(
+  store: WarehouseStore,
+  id: string,
+): Promise<Project | null> {
+  const rows = await store.all(
+    `SELECT ${PROJECT_COLUMNS} FROM platform.projects WHERE id = $1`,
+    [id],
+  );
+  const row = rows[0];
+  return row ? rowToProject(row) : null;
+}
+
 /** List all projects, newest first (id breaks ties for a stable order). */
 export async function listProjects(store: WarehouseStore): Promise<Project[]> {
   const rows = await store.all(

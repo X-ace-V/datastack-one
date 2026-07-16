@@ -24,6 +24,17 @@ export interface CreateProjectInput {
   servingStyle?: string;
 }
 
+/** An uploaded CSV source, mirroring the backend `SourceSchema`. */
+export interface Source {
+  id: string;
+  projectId: string;
+  kind: string;
+  path: string;
+  originalFilename: string | null;
+  rowCount: number | null;
+  createdAt: string;
+}
+
 /** Pull an `{ error }` message out of a failed response body, falling back to the status. */
 async function errorMessage(res: Response, fallback: string): Promise<string> {
   try {
@@ -58,4 +69,28 @@ export async function createProject(input: CreateProjectInput): Promise<Project>
     throw new Error(await errorMessage(res, "Failed to create project"));
   }
   return (await res.json()) as Project;
+}
+
+/** List a project's uploaded CSV sources, newest first. */
+export async function listSources(projectId: string): Promise<Source[]> {
+  const res = await fetch(`/api/projects/${projectId}/sources`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load sources"));
+  }
+  const body = (await res.json()) as { sources: Source[] };
+  return body.sources;
+}
+
+/** Upload a CSV file as a source for a project and return the persisted row. */
+export async function uploadSource(projectId: string, file: File): Promise<Source> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const res = await fetch(`/api/projects/${projectId}/source`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to upload source"));
+  }
+  return (await res.json()) as Source;
 }
