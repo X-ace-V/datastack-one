@@ -51,17 +51,19 @@ export interface PipelineStageDef {
 }
 
 /**
- * The ordered pipeline stages the runner executes. Extract → Land → Load → Transform — every
- * stage whose tool exists today. The DQ (`run_dq_check`) and Publish (`publish_serving`) stages
- * are appended here by T5.1/T5.2 when their tools land, at which point the runner and the
- * progress stepper carry all six. `gated` stages are the `ask` tools that pause for approval
- * (their names match {@link file://../opencode/config.ts}'s `ASK_TOOLS`).
+ * The ordered pipeline stages the runner executes. Extract → Land → Load → Transform → DQ —
+ * every stage whose tool exists today. The Publish (`publish_serving`) stage is appended here by
+ * T5.2 when its tool lands, at which point the runner and the progress stepper carry all six.
+ * `gated` stages are the `ask` tools that pause for approval (their names match
+ * {@link file://../opencode/config.ts}'s `ASK_TOOLS`); the DQ stage runs read-only checks and is
+ * NOT gated, but a DQ failure aborts the run so the later Publish stage never runs (FR7).
  */
 export const PIPELINE_STAGES: readonly PipelineStageDef[] = [
   { name: "extract", label: "Extract", tool: null, gated: false },
   { name: "land", label: "Land Parquet", tool: "land_parquet", gated: true },
   { name: "load", label: "Load Warehouse", tool: "load_warehouse", gated: true },
   { name: "transform", label: "Transform", tool: "run_transform", gated: true },
+  { name: "dq", label: "DQ Checks", tool: "run_dq_check", gated: false },
 ] as const;
 
 /** Request body for `POST /api/projects/:id/run`: which source + optional per-run model. */

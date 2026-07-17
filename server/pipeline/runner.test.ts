@@ -7,6 +7,7 @@ import { createRun, getRunState, insertRunStep } from "../store/runs.js";
 import { PIPELINE_STAGES, type RunApprovalRequest, type RunEvent, type RunStep } from "../core/run.js";
 import type { Source } from "../core/sources.js";
 import type { Transform } from "../core/transform.js";
+import type { DqSpec } from "../core/dq.js";
 import { runPipeline } from "./runner.js";
 
 /**
@@ -42,6 +43,18 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
     targetTable: "branch_balance_totals",
     assumptions: ["null balances count as zero"],
     questions: [],
+  };
+
+  // Checks that all pass against the loaded fixture: raw.source has 3 rows, no null loan_id, a
+  // `branch` column, and a non-null `ingestion_date` (added by the land stage).
+  const PASSING_DQ: DqSpec = {
+    targetTable: "raw.source",
+    checks: [
+      { name: "rows present", type: "row_count", column: null, description: "at least one row" },
+      { name: "id not null", type: "not_null", column: "loan_id", description: "loan_id not null" },
+      { name: "branch present", type: "schema", column: "branch", description: "branch exists" },
+      { name: "fresh", type: "freshness", column: "ingestion_date", description: "date present" },
+    ],
   };
 
   /** Stand up a store with a project, a run, its pending steps, a source CSV, and a landing dir. */
@@ -97,6 +110,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       steps,
       source,
       transform: TRANSFORM,
+      dqSpec: PASSING_DQ,
       landingDir,
       ingestionDate: "2026-07-17",
       approve: async (request) => {
@@ -108,13 +122,20 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
 
     // The run and every step ended in success.
     expect(state.run.status).toBe("success");
-    expect(state.steps.map((s) => s.name)).toEqual(["extract", "land", "load", "transform"]);
+    expect(state.steps.map((s) => s.name)).toEqual([
+      "extract",
+      "land",
+      "load",
+      "transform",
+      "dq",
+    ]);
     expect(state.steps.every((s) => s.status === "success")).toBe(true);
     // Step details reflect what actually happened at each stage.
     expect(state.steps[0]!.detail).toMatch(/read 3 rows/);
     expect(state.steps[1]!.detail).toMatch(/landed 3 rows/);
     expect(state.steps[2]!.detail).toMatch(/loaded 3 rows → raw\.source/);
     expect(state.steps[3]!.detail).toMatch(/materialized 2 rows → marts\.branch_balance_totals/);
+    expect(state.steps[4]!.detail).toMatch(/4 DQ checks passed against raw\.source/);
     // Started/finished timestamps were stamped.
     expect(state.steps.every((s) => s.startedAt && s.finishedAt)).toBe(true);
 
@@ -143,7 +164,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
     expect(events.filter((e) => e.kind === "approval.resolved")).toHaveLength(3);
     expect(
       events.filter((e) => e.kind === "step.status" && e.status === "success"),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
   });
 
   it("aborts the run as 'rejected' when a human rejects the first gated stage", async () => {
@@ -155,6 +176,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       steps,
       source,
       transform: TRANSFORM,
+      dqSpec: PASSING_DQ,
       landingDir,
       ingestionDate: "2026-07-17",
       // Reject the land stage; approve anything else (never reached).
@@ -192,6 +214,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
         assumptions: [],
         questions: [],
       },
+      dqSpec: PASSING_DQ,
       landingDir,
       ingestionDate: "2026-07-17",
       approve: async () => "approve",
@@ -205,6 +228,54 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
     expect(byName.get("transform")!.detail).toBeTruthy();
   });
 
+  it("fails the run when a DQ check fails, blocking publish", async () => {
+    const { store, runId, steps, source, landingDir } = await scaffold();
+
+    // A spec whose not_null check targets `balance` — which has a null in the fixture — so the DQ
+    // stage fails even though extract/land/load/transform all succeeded.
+    const FAILING_DQ: DqSpec = {
+      targetTable: "raw.source",
+      checks: [
+        { name: "rows present", type: "row_count", column: null, description: "at least one row" },
+        {
+          name: "balance not null",
+          type: "not_null",
+          column: "balance",
+          description: "balance never null",
+        },
+        { name: "branch present", type: "schema", column: "branch", description: "branch exists" },
+        { name: "fresh", type: "freshness", column: "ingestion_date", description: "date present" },
+      ],
+    };
+
+    const state = await runPipeline({
+      store,
+      runId,
+      steps,
+      source,
+      transform: TRANSFORM,
+      dqSpec: FAILING_DQ,
+      landingDir,
+      ingestionDate: "2026-07-17",
+      approve: async () => "approve",
+    });
+
+    // The run failed at the DQ stage — nothing publishes past a failed check (FR7).
+    expect(state.run.status).toBe("failed");
+    const byName = new Map(state.steps.map((s) => [s.name, s]));
+    // The write stages still succeeded; only the DQ gate blocked the run.
+    expect(byName.get("transform")!.status).toBe("success");
+    expect(byName.get("dq")!.status).toBe("failed");
+    expect(byName.get("dq")!.detail).toMatch(/balance not null/);
+
+    // The transform still materialized marts, proving the run reached DQ before being blocked —
+    // the DQ failure is what stops publish, not an earlier stage error.
+    const marts = await store.all(
+      `SELECT count(*)::BIGINT AS n FROM marts.branch_balance_totals`,
+    );
+    expect(Number(marts[0]?.n)).toBe(2);
+  });
+
   it("persists the terminal state independently of the returned value", async () => {
     const { store, runId, steps, source, landingDir } = await scaffold();
     await runPipeline({
@@ -213,6 +284,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       steps,
       source,
       transform: TRANSFORM,
+      dqSpec: PASSING_DQ,
       landingDir,
       ingestionDate: "2026-07-17",
       approve: async () => "approve",

@@ -1,16 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
+  allChecksPassed,
+  buildCheckQuery,
   buildDqPrompt,
   DQ_CHECK_TYPES,
   DQ_TARGET_TABLE,
   distinctCheckTypes,
   DqParseError,
+  DqRunResultSchema,
   DqSpecSchema,
+  evaluateCheck,
   extractJsonObject,
   MIN_DISTINCT_CHECK_TYPES,
   MIN_DQ_CHECKS,
   parseDqResponse,
   parseModelRef,
+  parseTableRef,
+  type DqCheck,
+  type DqCheckResult,
 } from "./dq.js";
 import { buildSourceProfile, type SourceProfile } from "./profile.js";
 
@@ -208,5 +215,165 @@ describe("parseDqResponse", () => {
   it("throws DqParseError when the object fails the schema", () => {
     const text = JSON.stringify({ targetTable: DQ_TARGET_TABLE, checks: VALID_SPEC.checks.slice(0, 1) });
     expect(() => parseDqResponse(text)).toThrow(DqParseError);
+  });
+});
+
+/**
+ * Unit tests for the pure execution contract (T5.1, FR7): parsing/sanitizing the target table,
+ * building each check's metric query, interpreting the metric into pass/fail, and the aggregate
+ * block-publish rule. These assert the desired result of the translation without touching DuckDB.
+ */
+describe("parseTableRef", () => {
+  it("splits a schema-qualified name on the first dot", () => {
+    expect(parseTableRef("raw.source")).toEqual({ schema: "raw", table: "source" });
+  });
+
+  it("treats an unqualified name as a bare table with no schema", () => {
+    expect(parseTableRef("source")).toEqual({ schema: "", table: "source" });
+  });
+
+  it("sanitizes each part so a crafted target can't smuggle SQL", () => {
+    // A quote/space in either half is reduced to `_` by safeTableName.
+    const ref = parseTableRef('raw."; DROP.source');
+    expect(ref.schema).toBe("raw");
+    expect(ref.table).toMatch(/^[A-Za-z0-9_]+$/);
+  });
+});
+
+describe("buildCheckQuery", () => {
+  const rowCount: DqCheck = {
+    name: "rows",
+    type: "row_count",
+    column: null,
+    description: "at least one row",
+  };
+  const notNull: DqCheck = {
+    name: "id not null",
+    type: "not_null",
+    column: "loan_id",
+    description: "loan_id not null",
+  };
+  const freshness: DqCheck = {
+    name: "fresh",
+    type: "freshness",
+    column: "opened_at",
+    description: "opened_at present",
+  };
+  const schemaCheck: DqCheck = {
+    name: "branch present",
+    type: "schema",
+    column: "branch",
+    description: "branch exists",
+  };
+
+  it("counts rows for a row_count check (no params, qualified table)", () => {
+    const q = buildCheckQuery(rowCount, "raw.source");
+    expect(q.sql).toBe(`SELECT count(*)::BIGINT AS metric FROM "raw"."source"`);
+    expect(q.params).toEqual([]);
+  });
+
+  it("counts NULLs in the quoted column for a not_null check", () => {
+    const q = buildCheckQuery(notNull, "raw.source");
+    expect(q.sql).toBe(
+      `SELECT count(*)::BIGINT AS metric FROM "raw"."source" WHERE "loan_id" IS NULL`,
+    );
+  });
+
+  it("counts non-null values for a freshness check", () => {
+    const q = buildCheckQuery(freshness, "raw.source");
+    expect(q.sql).toBe(`SELECT count("opened_at")::BIGINT AS metric FROM "raw"."source"`);
+  });
+
+  it("probes information_schema.columns with bound params for a schema check", () => {
+    const q = buildCheckQuery(schemaCheck, "raw.source");
+    expect(q.sql).toMatch(/information_schema\.columns/);
+    expect(q.params).toEqual(["raw", "source", "branch"]);
+  });
+
+  it("probes information_schema.tables for a table-level schema check (null column)", () => {
+    const q = buildCheckQuery(
+      { name: "table", type: "schema", column: null, description: "table exists" },
+      "raw.source",
+    );
+    expect(q.sql).toMatch(/information_schema\.tables/);
+    expect(q.params).toEqual(["raw", "source"]);
+  });
+
+  it("escapes embedded double-quotes in a column identifier", () => {
+    const q = buildCheckQuery(
+      { name: "x", type: "not_null", column: 'a"b', description: "d" },
+      "raw.source",
+    );
+    expect(q.sql).toContain('"a""b" IS NULL');
+  });
+});
+
+describe("evaluateCheck", () => {
+  it("row_count passes only when there is at least one row", () => {
+    const check: DqCheck = { name: "r", type: "row_count", column: null, description: "d" };
+    expect(evaluateCheck(check, 3).passed).toBe(true);
+    expect(evaluateCheck(check, 0).passed).toBe(false);
+  });
+
+  it("not_null passes only when zero NULLs were counted", () => {
+    const check: DqCheck = { name: "n", type: "not_null", column: "c", description: "d" };
+    expect(evaluateCheck(check, 0).passed).toBe(true);
+    expect(evaluateCheck(check, 2)).toEqual({ passed: false, detail: "2 NULL(s) in c" });
+  });
+
+  it("freshness passes only when a non-null value exists", () => {
+    const check: DqCheck = { name: "f", type: "freshness", column: "c", description: "d" };
+    expect(evaluateCheck(check, 1).passed).toBe(true);
+    expect(evaluateCheck(check, 0).passed).toBe(false);
+  });
+
+  it("schema passes only when a matching column/table was found", () => {
+    const check: DqCheck = { name: "s", type: "schema", column: "c", description: "d" };
+    expect(evaluateCheck(check, 1)).toEqual({ passed: true, detail: "c present" });
+    expect(evaluateCheck(check, 0)).toEqual({ passed: false, detail: "c missing" });
+  });
+});
+
+describe("allChecksPassed", () => {
+  const pass: DqCheckResult = {
+    name: "a",
+    type: "row_count",
+    column: null,
+    passed: true,
+    detail: "ok",
+  };
+  const fail: DqCheckResult = { ...pass, name: "b", passed: false, detail: "bad" };
+
+  it("is true only when every check passed and there is at least one", () => {
+    expect(allChecksPassed([pass, pass])).toBe(true);
+    expect(allChecksPassed([pass, fail])).toBe(false);
+    expect(allChecksPassed([])).toBe(false);
+  });
+});
+
+describe("DqRunResultSchema", () => {
+  const results: DqCheckResult[] = [
+    { name: "a", type: "row_count", column: null, passed: true, detail: "3 rows" },
+    { name: "b", type: "not_null", column: "id", passed: true, detail: "no nulls" },
+    { name: "c", type: "schema", column: "x", passed: true, detail: "present" },
+  ];
+
+  it("accepts a run result carrying at least MIN_DQ_CHECKS results", () => {
+    const parsed = DqRunResultSchema.parse({
+      targetTable: "raw.source",
+      results,
+      passed: true,
+    });
+    expect(parsed.results).toHaveLength(3);
+  });
+
+  it("rejects a run result with fewer than MIN_DQ_CHECKS results", () => {
+    expect(
+      DqRunResultSchema.safeParse({
+        targetTable: "raw.source",
+        results: results.slice(0, MIN_DQ_CHECKS - 1),
+        passed: true,
+      }).success,
+    ).toBe(false);
   });
 });

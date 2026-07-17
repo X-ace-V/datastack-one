@@ -31,13 +31,14 @@ async function main(): Promise<void> {
   const runApprovals = createRunApprovalGate();
   // Launch a run's pipeline in the background, wiring the runner's approval pauses to the run
   // approval gate and its progress events to the SSE bridge (published on the run's channel).
-  const launchRun: RunLauncher = ({ run, steps, source, transform }) => {
+  const launchRun: RunLauncher = ({ run, steps, source, transform, dqSpec }) => {
     void runPipeline({
       store,
       runId: run.id,
       steps,
       source,
       transform,
+      dqSpec,
       landingDir: DEFAULT_LANDING_DIR,
       approve: (request) => runApprovals.request(request),
       emit: (event) => bridge.publish(run.id, { event: event.kind, data: event }),

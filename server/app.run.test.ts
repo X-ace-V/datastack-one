@@ -8,6 +8,7 @@ import { insertArtifact } from "./store/artifacts.js";
 import { getRunState } from "./store/runs.js";
 import { createRunApprovalGate, type RunApprovalGate } from "./pipeline/run-approvals.js";
 import type { Transform } from "./core/transform.js";
+import type { DqSpec } from "./core/dq.js";
 import type { RunApprovalRequest } from "./core/run.js";
 
 /**
@@ -30,8 +31,24 @@ describe("run routes", () => {
     questions: [],
   };
 
-  /** A store seeded with a project, a source, and (optionally) a reviewed transform artifact. */
-  async function seeded(opts: { transform?: string | null } = {}): Promise<{
+  const DQ_SPEC: DqSpec = {
+    targetTable: "raw.source",
+    checks: [
+      { name: "rows present", type: "row_count", column: null, description: "at least one row" },
+      { name: "id not null", type: "not_null", column: "loan_id", description: "loan_id not null" },
+      { name: "branch present", type: "schema", column: "branch", description: "branch exists" },
+      { name: "fresh", type: "freshness", column: "opened_at", description: "date present" },
+    ],
+  };
+
+  /**
+   * A store seeded with a project, a source, and (optionally) a reviewed transform + DQ artifact.
+   * `transform`/`dq` default to the valid fixtures; pass `null` to omit one, or a raw string to
+   * store malformed content.
+   */
+  async function seeded(
+    opts: { transform?: string | null; dq?: string | null } = {},
+  ): Promise<{
     store: WarehouseStore;
     projectId: string;
     sourceId: string;
@@ -48,13 +65,23 @@ describe("run routes", () => {
       path: "/tmp/loans.csv",
       originalFilename: "loans.csv",
     });
-    const content = opts.transform === undefined ? JSON.stringify(TRANSFORM) : opts.transform;
-    if (content !== null) {
+    const transformContent =
+      opts.transform === undefined ? JSON.stringify(TRANSFORM) : opts.transform;
+    if (transformContent !== null) {
       await insertArtifact(store, {
         id: "art1",
         projectId: project.id,
         kind: "transform_sql",
-        content,
+        content: transformContent,
+      });
+    }
+    const dqContent = opts.dq === undefined ? JSON.stringify(DQ_SPEC) : opts.dq;
+    if (dqContent !== null) {
+      await insertArtifact(store, {
+        id: "art2",
+        projectId: project.id,
+        kind: "dq_spec",
+        content: dqContent,
       });
     }
     return { store, projectId: project.id, sourceId: source.id };
@@ -86,18 +113,20 @@ describe("run routes", () => {
         "land",
         "load",
         "transform",
+        "dq",
       ]);
 
-      // The launcher was handed the created run, steps, resolved source, and parsed transform.
+      // The launcher was handed the created run, steps, resolved source, parsed transform + DQ spec.
       expect(calls).toHaveLength(1);
       expect(calls[0]!.run.id).toBe(body.run.id);
-      expect(calls[0]!.steps).toHaveLength(4);
+      expect(calls[0]!.steps).toHaveLength(5);
       expect(calls[0]!.source.id).toBe("src1");
       expect(calls[0]!.transform).toEqual(TRANSFORM);
+      expect(calls[0]!.dqSpec).toEqual(DQ_SPEC);
 
       // The run + steps were persisted before the launch.
       const state = await getRunState(store, body.run.id);
-      expect(state?.steps).toHaveLength(4);
+      expect(state?.steps).toHaveLength(5);
     });
 
     it("404s an unknown project and a cross-project source", async () => {
@@ -136,6 +165,33 @@ describe("run routes", () => {
 
     it("422s when the stored transform artifact is not a valid transform", async () => {
       const { store, projectId } = await seeded({ transform: "{ not valid json" });
+      const { launchRun } = spyLauncher();
+      const app = buildServer({ store, launchRun });
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/run`,
+        payload: {},
+      });
+      expect(res.statusCode).toBe(422);
+    });
+
+    it("400s when there is no reviewed DQ spec to run", async () => {
+      const { store, projectId } = await seeded({ dq: null });
+      const { launchRun, calls } = spyLauncher();
+      const app = buildServer({ store, launchRun });
+
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/run`,
+        payload: {},
+      });
+      expect(res.statusCode).toBe(400);
+      expect(calls).toHaveLength(0);
+    });
+
+    it("422s when the stored DQ artifact is not a valid DQ spec", async () => {
+      const { store, projectId } = await seeded({ dq: "{ not valid json" });
       const { launchRun } = spyLauncher();
       const app = buildServer({ store, launchRun });
 
@@ -198,7 +254,7 @@ describe("run routes", () => {
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.run.id).toBe(runId);
-      expect(body.steps).toHaveLength(4);
+      expect(body.steps).toHaveLength(5);
       expect(body.approvals).toHaveLength(1);
       expect(body.approvals[0].requestID).toBe("req1");
     });

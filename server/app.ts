@@ -8,7 +8,7 @@ import { ProfileRequestSchema } from "./core/profile.js";
 import { RulesInputSchema } from "./core/artifacts.js";
 import { PlanRequestSchema, PlanParseError } from "./core/plan.js";
 import { TransformRequestSchema, TransformParseError } from "./core/transform.js";
-import { DqRequestSchema, DqParseError } from "./core/dq.js";
+import { DqRequestSchema, DqParseError, DqSpecSchema, type DqSpec } from "./core/dq.js";
 import { isCsvFilename, type Source } from "./core/sources.js";
 import { TransformSchema, type Transform } from "./core/transform.js";
 import {
@@ -65,6 +65,7 @@ export type RunLauncher = (input: {
   steps: RunStep[];
   source: Source;
   transform: Transform;
+  dqSpec: DqSpec;
 }) => void;
 
 /** Backend identity, surfaced by `/api/health` so a client can confirm the target. */
@@ -702,14 +703,15 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     },
   );
 
-  // FR8/FR9 (T4.4): start a pipeline run for a project. Resolves the source (named or newest)
-  // and the reviewed transform artifact (required — the run executes it), creates the run and one
-  // pending step per pipeline stage, then launches the scripted runner in the background and
-  // returns 202 immediately: a run pauses for human approval, so it outlives this request. The
-  // client watches progress on `GET /api/runs/:runId/events` and answers gated stages via
-  // `POST /api/runs/:runId/approvals/:requestID`. Status map: 503 unwired store/runner, 400 bad
-  // body / no source / no reviewed transform, 404 unknown project or cross-project source, 422 the
-  // stored transform is not valid, 202 the run started.
+  // FR7/FR8/FR9 (T4.4/T5.1): start a pipeline run for a project. Resolves the source (named or
+  // newest), the reviewed transform artifact and the reviewed DQ spec (both required — the run
+  // executes them), creates the run and one pending step per pipeline stage, then launches the
+  // scripted runner in the background and returns 202 immediately: a run pauses for human approval,
+  // so it outlives this request. The client watches progress on `GET /api/runs/:runId/events` and
+  // answers gated stages via `POST /api/runs/:runId/approvals/:requestID`. Status map: 503 unwired
+  // store/runner, 400 bad body / no source / no reviewed transform / no reviewed DQ spec, 404
+  // unknown project or cross-project source, 422 a stored transform or DQ artifact is not valid,
+  // 202 the run started.
   app.post<{ Params: { id: string } }>(
     "/api/projects/:id/run",
     async (req, reply) => {
@@ -767,6 +769,23 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
           .send({ error: "the stored transform artifact is not a valid transform" });
       }
 
+      // The DQ stage runs the reviewed checks and blocks publish on failure (FR7), so a reviewed
+      // DQ spec must be on file before a run can start — just like the transform above.
+      const dqArtifact = await getLatestArtifactByKind(deps.store, project.id, "dq_spec");
+      if (!dqArtifact?.content) {
+        return reply
+          .code(400)
+          .send({ error: "no reviewed DQ checks to run; generate and review them first" });
+      }
+      let dqSpec;
+      try {
+        dqSpec = DqSpecSchema.parse(JSON.parse(dqArtifact.content));
+      } catch {
+        return reply
+          .code(422)
+          .send({ error: "the stored DQ artifact is not a valid DQ spec" });
+      }
+
       // Create the run + one pending step per pipeline stage before launching, so the run is
       // fully persisted and queryable the moment the client subscribes to its progress.
       const run = await createRun(deps.store, {
@@ -786,7 +805,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         );
       }
 
-      deps.launchRun({ run, steps, source, transform });
+      deps.launchRun({ run, steps, source, transform, dqSpec });
       return reply.code(202).send({ run, steps });
     },
   );

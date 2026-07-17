@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import type { WarehouseStore } from "../store/duckdb.js";
 import type { Source } from "../core/sources.js";
 import type { Transform } from "../core/transform.js";
+import type { DqSpec } from "../core/dq.js";
 import type { ApprovalAction } from "../core/approvals.js";
 import {
   PIPELINE_STAGES,
@@ -15,6 +16,7 @@ import { safeDatasetName } from "../core/landing.js";
 import { landParquet } from "../tools/land.js";
 import { loadWarehouse } from "../tools/warehouse.js";
 import { runTransform } from "../tools/transform.js";
+import { runDqCheck } from "../tools/dq.js";
 import {
   completeRunStep,
   getRunState,
@@ -23,13 +25,14 @@ import {
 } from "../store/runs.js";
 
 /**
- * The scripted pipeline runner (TASKS T4.4, PRD FR8/FR9, ARCHITECTURE §3.3, §4). It drives the
- * run through its ordered stages deterministically — Extract → Land → Load → Transform, every
- * stage whose tool exists today (the DQ and Publish stages join when T5.1/T5.2 land their tools).
- * Each stage's status is persisted to `platform.run_steps` and emitted for the SSE stream (FR9);
- * before every `ask` tool (land/load/transform) the runner parks on {@link RunPipelineDeps.approve}
- * and does not execute until a human approves, so nothing writes or executes unapproved (FR8). A
- * reject aborts the run. An I/O module (DuckDB via the tools + the run store), so it lives under
+ * The scripted pipeline runner (TASKS T4.4/T5.1, PRD FR7/FR8/FR9, ARCHITECTURE §3.3, §4). It drives
+ * the run through its ordered stages deterministically — Extract → Land → Load → Transform → DQ,
+ * every stage whose tool exists today (the Publish stage joins when T5.2 lands its tool). Each
+ * stage's status is persisted to `platform.run_steps` and emitted for the SSE stream (FR9); before
+ * every `ask` tool (land/load/transform) the runner parks on {@link RunPipelineDeps.approve} and
+ * does not execute until a human approves, so nothing writes or executes unapproved (FR8). A reject
+ * aborts the run; a data-quality failure in the DQ stage also aborts it, so a later Publish stage
+ * never runs (FR7). An I/O module (DuckDB via the tools + the run store), so it lives under
  * `server/pipeline`; the schemas and stage list are the pure {@link file://../core/run.ts}.
  */
 
@@ -45,6 +48,8 @@ export interface RunPipelineDeps {
   source: Source;
   /** The reviewed transform (SQL + target table) to execute in the Transform stage. */
   transform: Transform;
+  /** The reviewed DQ spec (target table + ≥3 checks) executed in the DQ stage; a failure aborts the run. */
+  dqSpec: DqSpec;
   /** Landing root the land stage writes Parquet under. */
   landingDir: string;
   /** Ingestion date to partition under; defaults to today (UTC) when omitted. */
@@ -60,6 +65,18 @@ class StageRejectedError extends Error {
   constructor(tool: string) {
     super(`${tool} was rejected at the approval gate`);
     this.name = "StageRejectedError";
+  }
+}
+
+/**
+ * Raised when one or more data-quality checks fail (FR7). Carries the failed check names so the
+ * step detail explains what blocked the run. It fails the DQ stage — and therefore the run — so
+ * the later Publish stage never executes: the "block publish on DQ failure" guard.
+ */
+class DqChecksFailedError extends Error {
+  constructor(failed: string[]) {
+    super(`data-quality checks failed: ${failed.join(", ")}`);
+    this.name = "DqChecksFailedError";
   }
 }
 
@@ -179,6 +196,17 @@ export async function runPipeline(deps: RunPipelineDeps): Promise<RunState> {
         targetTable: deps.transform.targetTable,
       });
       return `materialized ${res.rowCount} rows → ${res.qualifiedTable}`;
+    });
+
+    // DQ — read-only, not gated: run the reviewed checks. Any failure throws, failing the run so
+    // a later Publish stage never executes (FR7: DQ failure blocks publish).
+    await stage("dq", async () => {
+      const result = await runDqCheck(store, { spec: deps.dqSpec });
+      const failed = result.results.filter((r) => !r.passed);
+      if (!result.passed) {
+        throw new DqChecksFailedError(failed.map((r) => r.name));
+      }
+      return `${result.results.length} DQ checks passed against ${result.targetTable}`;
     });
 
     await updateRunStatus(store, runId, "success");

@@ -12,25 +12,32 @@ import {
 
 /** Pure-contract tests for the run schemas + the pipeline stage list (T4.4). */
 describe("PIPELINE_STAGES", () => {
-  it("is the ordered Extract → Land → Load → Transform pipeline", () => {
+  it("is the ordered Extract → Land → Load → Transform → DQ pipeline", () => {
     expect(PIPELINE_STAGES.map((s) => s.name)).toEqual([
       "extract",
       "land",
       "load",
       "transform",
+      "dq",
     ]);
   });
 
-  it("gates exactly the three write/execute tools, and only those name tools", () => {
+  it("gates exactly the three write/execute tools, and only those", () => {
     const gated = PIPELINE_STAGES.filter((s) => s.gated);
     expect(gated.map((s) => s.tool)).toEqual([
       "land_parquet",
       "load_warehouse",
       "run_transform",
     ]);
-    // Every gated stage names a tool; the read-only stage names none.
-    expect(PIPELINE_STAGES.every((s) => s.gated === (s.tool !== null))).toBe(true);
+    // Every gated stage names a tool.
+    expect(gated.every((s) => s.tool !== null)).toBe(true);
+    // The read-only extract stage names no tool and is not gated.
     expect(PIPELINE_STAGES.find((s) => s.name === "extract")!.gated).toBe(false);
+    // The DQ stage names a tool (run_dq_check) but is NOT gated — it runs read-only checks; a
+    // DQ failure blocks the run rather than pausing for approval (FR7).
+    const dq = PIPELINE_STAGES.find((s) => s.name === "dq")!;
+    expect(dq.tool).toBe("run_dq_check");
+    expect(dq.gated).toBe(false);
   });
 });
 

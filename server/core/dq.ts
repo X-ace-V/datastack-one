@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { SourceProfile } from "./profile.js";
+import { safeTableName } from "./warehouse.js";
 
 /**
  * Pure data-quality-generation contract (PRD FR7). The DQ stage prompts the agent to turn the
@@ -246,4 +247,180 @@ export function parseDqResponse(text: string): DqSpec {
     throw new DqParseError(`model response did not match the DQ schema: ${summary}`);
   }
   return parsed.data;
+}
+
+// ---------------------------------------------------------------------------
+// Execution contract (T5.1, FR7) — turning a reviewed {@link DqSpec} into runnable
+// queries and evaluating their outcomes. The `run_dq_check` tool
+// ({@link file://../tools/dq.ts}) does the I/O; everything here stays pure so the
+// check-to-SQL translation and the pass/fail decision are unit-testable and the
+// "block publish on failure" rule ({@link allChecksPassed}) is asserted directly.
+// ---------------------------------------------------------------------------
+
+/** A schema-qualified table split into its parts, each already reduced to a safe identifier. */
+export interface TableRef {
+  /** The schema, e.g. `raw`; empty string when the target had no `schema.` qualifier. */
+  schema: string;
+  /** The bare table name, e.g. `source`. */
+  table: string;
+}
+
+/**
+ * Split a (possibly schema-qualified) table name like `raw.source` into `{ schema, table }`,
+ * reducing each part to a safe SQL identifier via {@link safeTableName} so a crafted target
+ * name in the spec can never smuggle SQL into a check query. A name without a `.` yields an
+ * empty `schema` and the whole name as `table`. Splits on the first `.` only.
+ */
+export function parseTableRef(qualified: string): TableRef {
+  const dot = qualified.indexOf(".");
+  if (dot <= 0 || dot === qualified.length - 1) {
+    return { schema: "", table: safeTableName(qualified) };
+  }
+  return {
+    schema: safeTableName(qualified.slice(0, dot)),
+    table: safeTableName(qualified.slice(dot + 1)),
+  };
+}
+
+/** Escape a string for safe interpolation as a double-quoted SQL identifier. */
+function quoteIdent(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+/** Render a {@link TableRef} as a quoted, optionally schema-qualified identifier for a query. */
+function quoteTableRef(ref: TableRef): string {
+  return ref.schema
+    ? `${quoteIdent(ref.schema)}.${quoteIdent(ref.table)}`
+    : quoteIdent(ref.table);
+}
+
+/**
+ * A parameterized query whose single row's `metric` column (a non-negative integer) is fed to
+ * {@link evaluateCheck} to decide pass/fail. Kept as `{ sql, params }` — never a
+ * string-concatenated value — so the tool binds every literal through DuckDB parameters.
+ */
+export interface DqCheckQuery {
+  /** The SQL to run; selects one column aliased `metric`. */
+  sql: string;
+  /** Positional bind values ($1..$n) for the query — always identifier strings. */
+  params: string[];
+}
+
+/**
+ * Build the metric query for one check against `targetTable`. Each query returns a single
+ * `metric` count that {@link evaluateCheck} interprets:
+ * - `row_count` → number of rows (pass when > 0);
+ * - `not_null` → number of NULLs in the key column (pass when 0);
+ * - `freshness` → number of non-null values in the date column (pass when > 0);
+ * - `schema` → number of matching columns in `information_schema` (pass when > 0), or matching
+ *   tables when the check is table-level (`column` null).
+ *
+ * Column identifiers are double-quoted (escaped) before interpolation; the schema/table/column
+ * names used to probe `information_schema` are bound as parameters. The table itself is parsed
+ * and sanitized via {@link parseTableRef}.
+ */
+export function buildCheckQuery(check: DqCheck, targetTable: string): DqCheckQuery {
+  const ref = parseTableRef(targetTable);
+  const table = quoteTableRef(ref);
+  switch (check.type) {
+    case "row_count":
+      return { sql: `SELECT count(*)::BIGINT AS metric FROM ${table}`, params: [] };
+    case "not_null": {
+      const col = quoteIdent(check.column ?? "");
+      return {
+        sql: `SELECT count(*)::BIGINT AS metric FROM ${table} WHERE ${col} IS NULL`,
+        params: [],
+      };
+    }
+    case "freshness": {
+      const col = quoteIdent(check.column ?? "");
+      return {
+        sql: `SELECT count(${col})::BIGINT AS metric FROM ${table}`,
+        params: [],
+      };
+    }
+    case "schema":
+      if (check.column) {
+        return {
+          sql:
+            `SELECT count(*)::BIGINT AS metric FROM information_schema.columns ` +
+            `WHERE table_schema = ? AND table_name = ? AND column_name = ?`,
+          params: [ref.schema, ref.table, check.column],
+        };
+      }
+      return {
+        sql:
+          `SELECT count(*)::BIGINT AS metric FROM information_schema.tables ` +
+          `WHERE table_schema = ? AND table_name = ?`,
+        params: [ref.schema, ref.table],
+      };
+  }
+}
+
+/**
+ * Decide whether a check passed from its metric count and produce a human-readable detail line.
+ * Pure so both the tool and tests share one interpretation of each check type.
+ */
+export function evaluateCheck(
+  check: DqCheck,
+  metric: number,
+): { passed: boolean; detail: string } {
+  switch (check.type) {
+    case "row_count":
+      return metric > 0
+        ? { passed: true, detail: `table has ${metric} row(s)` }
+        : { passed: false, detail: "table has no rows" };
+    case "not_null":
+      return metric === 0
+        ? { passed: true, detail: `no NULLs in ${check.column}` }
+        : { passed: false, detail: `${metric} NULL(s) in ${check.column}` };
+    case "freshness":
+      return metric > 0
+        ? { passed: true, detail: `${metric} non-null value(s) in ${check.column}` }
+        : { passed: false, detail: `no non-null values in ${check.column}` };
+    case "schema":
+      return metric > 0
+        ? { passed: true, detail: `${check.column ?? "table"} present` }
+        : { passed: false, detail: `${check.column ?? "table"} missing` };
+  }
+}
+
+/** One executed check's outcome (T5.1, FR7): the reviewed check plus whether it passed. */
+export const DqCheckResultSchema = z.object({
+  /** The check's name, echoed from the spec. */
+  name: z.string().min(1),
+  /** The check kind that was run. */
+  type: z.enum(DQ_CHECK_TYPES),
+  /** The column the check applied to, or `null` for a table-level check. */
+  column: z.string().min(1).nullable(),
+  /** Whether the check passed. */
+  passed: z.boolean(),
+  /** Human-readable outcome (row/NULL counts, or the error when the query threw). */
+  detail: z.string().min(1),
+});
+export type DqCheckResult = z.infer<typeof DqCheckResultSchema>;
+
+/**
+ * The result of executing a whole {@link DqSpec} (T5.1, FR7). `passed` is the aggregate the
+ * pipeline gates on: **the run must not publish when it is `false`** (any single failed check
+ * blocks publish). At least {@link MIN_DQ_CHECKS} results are always present, since the spec
+ * that produced them was itself validated to carry ≥3 checks.
+ */
+export const DqRunResultSchema = z.object({
+  /** The table the checks ran against. */
+  targetTable: z.string().min(1),
+  /** One result per check, in spec order. */
+  results: z.array(DqCheckResultSchema).min(MIN_DQ_CHECKS),
+  /** Aggregate gate: true only when every check passed. */
+  passed: z.boolean(),
+});
+export type DqRunResult = z.infer<typeof DqRunResultSchema>;
+
+/**
+ * The publish gate (FR7): a DQ run permits publishing only when it ran at least one check and
+ * **every** check passed. A single failure blocks publish. This is the deterministic-runner
+ * equivalent of ARCHITECTURE §5's `tool.execute.before` guard.
+ */
+export function allChecksPassed(results: DqCheckResult[]): boolean {
+  return results.length > 0 && results.every((r) => r.passed);
 }
