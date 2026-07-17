@@ -1,27 +1,25 @@
-# DataStack One — Architecture
+# DataStack One — Architecture (v2: Conversational Agent)
 
-Last updated: 2026-07-16
-Status: **proposed — awaiting confirmation**
+Last updated: 2026-07-17
+Status: **proposed — awaiting confirmation** · supersedes the v1 wizard architecture
 
-This document describes how the MVP is built. It is the technical companion to
-[`PRD.md`](./PRD.md). Where the PRD says *what*, this says *how*.
+Technical companion to [`PRD.md`](./PRD.md). The blueprint is the two Crux apps in this
+workspace (`opencode-cowork` backend, `crux-frontend-rebrand` chat UI), sized down for a
+single-user localhost app.
 
 ---
 
 ## 1. Guiding principles
 
-1. **Don't build the harness — drive one.** OpenCode provides the agent loop, tool
-   calling, sandboxed execution, permission gating, and event streaming. We build the
-   *data-engineering* part: the tools, the pipeline, and the UI.
-2. **Local-first.** Everything runs on `127.0.0.1`. No cloud, no deploy, no auth server.
-   The "platform" is a local web app you open in a browser, like Prisma Studio.
-3. **Constrain the agent.** A free-roaming coding agent is impressive but flaky on stage.
-   We give it a **fixed toolset** and a **fixed pipeline of steps**, each with a
-   structured-output contract. The agent fills the gaps; it does not invent the stack.
-4. **Approve before execute.** Every tool that writes or runs code is permission-gated.
-   Nothing mutates data or runs SQL without an explicit human click.
-5. **One engine now, many later.** DuckDB is the whole warehouse for the MVP. The tool
-   interfaces are written so Postgres / Spark / MinIO can slot in behind them later.
+1. **The agent is the interface.** Natural language in → the agent calls tools → results
+   stream back. No wizard, no fixed pipeline.
+2. **Don't build the agent loop — drive OpenCode.** We own one embedded OpenCode server and
+   drive **sessions** through it.
+3. **Tools are the only way to touch data.** The agent's *capabilities* are a fixed, audited
+   tool set; it chooses the *order*. Writes are approval-gated; reads (profile, query) are free.
+4. **Local & single-user.** Everything on `127.0.0.1`. One OpenCode server, many sessions —
+   not Crux's process-per-session (that's for multi-tenant isolation we don't need).
+5. **Reuse the v1 engine.** Keep the data tools and DuckDB; replace the shell and control flow.
 
 ---
 
@@ -30,272 +28,216 @@ This document describes how the MVP is built. It is the technical companion to
 ```mermaid
 flowchart TD
     subgraph Browser["Browser — localhost:5173"]
-        UI["React + Vite + Tailwind v4<br/>Create · Connect · Plan · Review · Run · Serve"]
+        SB["Session sidebar"]
+        CHAT["Chat stream<br/>text · reasoning · tool cards · inline approvals"]
+        PANEL["Data panel<br/>schema · query results · endpoints"]
     end
 
-    subgraph Backend["Backend — Node/TS (Fastify) localhost:3001"]
-        API["REST routes<br/>projects · sources · runs · approvals · serve"]
-        BRIDGE["OpenCode bridge<br/>events → SSE · permissions → approval queue"]
-        STORE["Metadata store<br/>(DuckDB 'platform' schema)"]
+    subgraph Backend["Backend — Node/TS (Fastify) :3001"]
+        SESS["Session manager<br/>create/prompt/cancel, persistence"]
+        BRIDGE["Event bridge<br/>event.subscribe → SSE (per-session, replay)"]
+        APPR["Approval bridge<br/>permission.asked → inline → reply"]
+        ROUTES["REST: sessions · chat · sources · approvals · serve · models"]
     end
 
-    subgraph Agent["OpenCode server — in-process, localhost"]
-        OC["Agent runtime<br/>model router · session · permissions"]
-        TOOLS["Custom data-eng tools<br/>@opencode-ai/plugin"]
+    subgraph OC["Embedded OpenCode server (in-process)"]
+        AGENT["Agent runtime<br/>sessions · model router · permissions"]
+        TOOLS["Data-eng tools (@opencode-ai/plugin)<br/>profile · query · connect_pg · land · load · transform · dq · serve"]
     end
 
     subgraph Data["Local data plane"]
-        DUCK["DuckDB<br/>raw · staging · marts · platform"]
-        LAND["landing/ — Parquet files"]
-        UP["uploads/ — CSVs"]
+        DUCK["DuckDB<br/>platform · raw · staging · marts"]
+        PG["Live Postgres<br/>ATTACHed read-only"]
+        LAND["landing/ Parquet · uploads/ CSV"]
     end
 
-    UI <-->|REST + SSE| API
-    UI <-->|REST + SSE| BRIDGE
-    API --> STORE
-    BRIDGE <-->|SDK client| OC
-    OC --> TOOLS
+    SB <-->|REST| ROUTES
+    CHAT <-->|REST + SSE| ROUTES
+    CHAT <-->|SSE| BRIDGE
+    CHAT <-->|approve/deny| APPR
+    PANEL <-->|REST| ROUTES
+    ROUTES --> SESS
+    SESS <-->|SDK client| AGENT
+    BRIDGE <-->|event.subscribe| AGENT
+    APPR <-->|permission.reply| AGENT
+    AGENT --> TOOLS
     TOOLS --> DUCK
+    TOOLS --> PG
     TOOLS --> LAND
-    TOOLS --> UP
-    STORE --> DUCK
+    SESS --> DUCK
 ```
 
-**Three processes conceptually, one command to run.** The OpenCode server is spawned
-in-process by the backend via `createOpencode(...)`, so `npm run dev` starts the backend
-(with OpenCode inside it) and the Vite dev server for the UI.
+**One command.** `npm run dev` boots the backend (with the embedded OpenCode server inside
+it) and the Vite dev server. No Electron.
 
 ---
 
-## 3. Component responsibilities
+## 3. Backend (`server/`)
 
-### 3.1 Frontend — `web/`
-- React 19 + Vite + Tailwind v4 (CSS-first, `@tailwindcss/vite`).
-- A 6-step wizard mirroring the product flow. Each step is a route.
-- Subscribes to backend **SSE** for two streams:
-  - **progress events** (agent reasoning + task-level step status), and
-  - **approval requests** (renders the modal that gates execution).
-- No business logic — it renders state and posts user intent (upload, approve, run).
+### 3.1 OpenCode + sessions
+- **One embedded server**: `createOpencode({ config: { model, permission, plugin } })` at
+  boot. Default model `opencode/big-pickle`.
+- **Session manager** (`server/opencode/sessions.ts`): `client.session.create` per chat
+  session; `client.session.prompt({ path:{id}, body:{ parts:[{type:'text',text}], model }})`
+  to send an NL turn; `session.abort` to cancel. A session's id + title + model + message
+  history persist in the DuckDB `platform` schema so it reopens.
+- **Context injection** (optional, Crux pattern): `noReply` prompts to tell the agent about a
+  newly connected source without triggering a reply.
 
-### 3.2 Backend — `server/`
-- **Fastify** HTTP server on `:3001`. Owns:
-  - REST routes for the product (see §7).
-  - The **OpenCode client** and the **bridge** that relays events + permissions.
-  - The **metadata store** (projects, sources, runs, artifacts, DQ results, approvals).
-  - The dynamically-registered **serving endpoints** (`/api/serve/:name`).
-- `server/core/` is pure (no fs/net) and holds schemas + pipeline definitions;
-  `server/tools`, `server/routes`, `server/opencode` may do I/O. (Same discipline as
-  the `useme` core/cli split.)
+### 3.2 Event bridge (`server/opencode/bridge.ts`)
+- One `client.event.subscribe()` loop maps OpenCode events → our SSE:
+  `message.part.updated`→text/reasoning deltas, tool parts→tool-call events (name/args/
+  status), `session.idle`→turn done. Fanned to `GET /api/events` with **per-session routing**
+  and a **monotonic-seq replay buffer** (reconnect via `?lastSeq`). Mirrors Crux `sse.ts`.
 
-### 3.3 Agent runtime — OpenCode
-- Spawned via `createOpencode({ config: { model: "opencode/big-pickle", permission: {...} } })`.
-- Runs **one primary agent** ("Data Platform Engineer") with the full custom toolset.
-- The backend drives it as a **scripted pipeline**: one `session.prompt` per stage, each
-  constrained to the tools and the `json_schema` output that stage needs. This keeps runs
-  deterministic and demo-safe while still being genuinely agentic within each stage.
+### 3.3 Approval bridge (`server/opencode/approvals.ts`)
+- `permission.asked` (fired when an `ask` tool is about to run) → recorded pending → emitted
+  as an SSE `approval` event with the exact SQL/DDL → answered by
+  `POST /api/approvals/:requestID` → `client.permission.reply({ requestID, action })`. No
+  `always` — every write is approved once (PRD FR10). Each ask/reply logged to lineage.
 
-### 3.4 Data plane
-- **DuckDB** single file `data/warehouse.duckdb` with schemas:
-  - `platform` — our metadata (projects, runs, artifacts, dq_results, approvals).
-  - `raw` — landed source data loaded from Parquet.
-  - `staging` — cleaned/typed staging tables.
-  - `marts` — final business tables that get served.
-- **`data/landing/`** — Parquet written by the land step (`COPY ... TO ... (FORMAT PARQUET)`),
-  partitioned by ingestion date. This is our "S3." Upgrade path: point DuckDB at a MinIO
-  S3 endpoint — the tool interface doesn't change.
-- **`data/uploads/`** — raw uploaded CSVs.
-
----
-
-## 4. The runtime pipeline (what a user actually does)
-
-```mermaid
-sequenceDiagram
-    participant U as User (UI)
-    participant B as Backend
-    participant A as OpenCode Agent
-    participant D as DuckDB / landing
-
-    U->>B: Create project + upload loan CSV
-    B->>A: prompt: profile source (tool: profile_source)
-    A->>D: read_csv_auto sample
-    A-->>B: schema, types, nulls, keys, date cols (json)
-    B-->>U: show profile
-
-    U->>B: request architecture plan (+ upload rules doc)
-    B->>A: prompt: plan + generate artifacts
-    A-->>B: plan, DDL, transform SQL, DQ checks, serving spec (json + files)
-    B-->>U: show generated artifacts for REVIEW
-
-    U->>B: Approve
-    U->>B: Run
-    loop each stage
-        B->>A: prompt stage (execution tool → permission "ask")
-        A-->>B: permission.asked (exact SQL/DDL)
-        B-->>U: approval modal
-        U->>B: approve/reject
-        B->>A: permission.reply(once|reject)
-        A->>D: execute (land / load / transform / dq / publish)
-        A-->>B: step result (stream)
-        B-->>U: step ✓ / ✗
-    end
-    B-->>U: Serve: table preview · CSV · REST endpoint · dashboard
-```
-
-Six visible pipeline steps (satisfies "≥5 visible tasks"):
-**Extract → Land Parquet → Load Warehouse → Transform → DQ Checks → Publish.**
-
----
-
-## 5. Custom tools — the heart of the product
-
-Registered via `@opencode-ai/plugin`. Each is a real TypeScript function the agent calls.
-Permission column shows the default (`allow` = runs freely, `ask` = human-gated).
+### 3.4 Data tools (`server/tools/`, one `@opencode-ai/plugin`)
+The agent-facing capabilities. Registered via `config.plugin` (a plugin module returning a
+`tool` map). Permissions from `config.permission`.
 
 | Tool | Args | Does | Permission |
 |------|------|------|-----------|
-| `profile_source` | `path` | Profiles CSV via DuckDB `read_csv_auto`: schema, types, row count, null %, candidate PKs, date columns. Read-only. | `allow` |
-| `read_rules` | `path` | Reads the plain-English transformation rules document. | `allow` |
-| `write_artifact` | `path, content` | Writes a generated artifact (SQL, DDL, DAG json) into `artifacts/` for UI review. Does not execute. | `allow` |
-| `land_parquet` | `source, partitionBy` | Writes raw data to `landing/` as partitioned Parquet. | **`ask`** |
-| `load_warehouse` | `parquetPath, table` | Loads Parquet into a `raw`/`staging` DuckDB table. | **`ask`** |
-| `run_transform` | `sql` | Executes transformation SQL, creating `marts` tables. The riskiest tool. | **`ask`** |
-| `run_dq_check` | `checks[]` | Runs data-quality checks (row count, null, schema, freshness). Returns pass/fail. Blocks publish on fail. | `allow` |
-| `publish_serving` | `table, format` | Registers a served table, generates a REST endpoint + CSV export. | **`ask`** |
+| `list_sources` | — | List connected sources in the session. | allow |
+| `profile_source` | `source` | Schema, types, rows, null %, keys, date cols (DuckDB). | allow |
+| `run_query` | `sql` | **Read-only** SELECT over DuckDB (+ attached Postgres). Returns rows. | allow |
+| `attach_source` | `name` | ATTACH a **registered** connection (by name) read-only; the backend resolves name→URL. Never receives the raw URL. | **ask** |
+| `land_parquet` | `source, partitionBy` | `COPY … TO landing/… (FORMAT PARQUET)`. | **ask** |
+| `load_warehouse` | `parquet, table` | Parquet → `raw`/`staging`. | **ask** |
+| `run_transform` | `sql` | Execute transform SQL → `marts`. | **ask** |
+| `run_dq_check` | `checks[]` | Row count / null / schema / freshness; block later publish on fail. | allow |
+| `publish_serving` | `table` | Register a served table + CSV export. | **ask** |
 
-**How the PRD's 7 agents map here:** they become **prompt phases + tools + hooks**, not
-7 separate processes.
+Heavy/credentialed work the plugin can't do in-process calls back to the backend over
+loopback (Crux `internal.ts` pattern) — kept minimal for the MVP.
 
-| PRD agent | Realized as |
-|-----------|-------------|
-| 1. Source Profiler | `profile_source` tool + profile stage prompt |
-| 2. Architecture Planner | plan stage prompt (json_schema plan) |
-| 3. Orchestration Builder | pipeline definition + generated DAG artifact |
-| 4. Transformation Engineer | `read_rules` + `write_artifact` + transform stage prompt |
-| 5. Data Quality Reviewer | `run_dq_check` + `tool.execute.before` guard (block publish if DQ failed) |
-| 6. Serving Layer Builder | `publish_serving` + dynamic `/api/serve/:name` route |
-| 7. Safety & Approval Gate | OpenCode **permission system** (`ask` on write/execute tools) |
+### 3.5 REST surface
+`/api/sessions` (CRUD) · `/api/sessions/:id/chat` · `…/cancel` · `/api/events` (SSE) ·
+`/api/sessions/:id/sources` (upload CSV / list) · `/api/approvals/:requestID` ·
+`/api/serve/:name` · `/api/serve/:name.csv` · `/api/models` ·
+`/api/connections` (add/list/delete — secrets never returned) · `/api/connections/:name/test`.
+
+### 3.6 Data plane
+DuckDB file `data/warehouse.duckdb` with `platform` (sessions, messages, sources, runs,
+lineage, served registry), `raw`/`staging`/`marts`. Postgres via the DuckDB `postgres`
+extension, **`ATTACH … READ_ONLY`**. CSV uploads in `data/uploads/`, Parquet in
+`data/landing/`.
+
+### 3.7 Connections & secrets (`server/connections/`)
+- A **Settings → Connections** panel is the *only* place a database URL is entered. It
+  registers Postgres (Neon) connections and stores the secret **server-side and gitignored**
+  (`platform.connections` in DuckDB or `data/connections.json` — never committed, never sent
+  to the browser).
+- **Name-based resolution (hard rule).** Agent tools take a connection/source **name**; the
+  backend resolves name → URL and runs `ATTACH '<url>' AS <name> (TYPE postgres, READ_ONLY)`.
+  The raw URL/password **never** enters a prompt, an SSE event, or a model-produced tool
+  argument (Crux loopback pattern). `list_sources`/`profile_source` expose only name + schema.
+- REST: `POST /api/connections` (add), `GET /api/connections` (names + types, **no secrets**),
+  `POST /api/connections/:name/test`, `DELETE /api/connections/:name`.
 
 ---
 
-## 6. The approval gate (concrete)
+## 4. Frontend (`web/`)
+
+Layout mirrors Crux `MainLayout`: **session sidebar (left) + chat stream (center) + data
+panel (right)**. React 19 + Vite + Tailwind v4. REST + SSE (no SDK in the browser).
+
+- **Live store** (`web/src/store/sessionStore.ts`) — a per-session `Map` of live state
+  (messages, streaming text, reasoning, ordered tool blocks, pending approval). Only the
+  active session mirrors to React state; background sessions accumulate. Mirrors Crux
+  `useSessionStore`.
+- **SSE hook** (`web/src/hooks/useEvents.ts`) — one `EventSource` on `/api/events`; a named
+  handler per event type routes into the store; `?lastSeq` replay on reconnect. Mirrors Crux
+  `useWorkspaceSSE`.
+- **Rendering** — the store turns the event stream into ordered **inline blocks**
+  (`text | reasoning | tool | approval`). `ChatStream → MessageBubble → InlineSteps` renders
+  them in reading order; a `ToolCard` shows tool name + one-line detail + status + expandable
+  args/result; an `ApprovalPill` renders inline Allow/Deny with the SQL. Mirrors Crux
+  `InlineSteps`.
+- **Sidebar** — session list (create / switch / rename / delete). **Data panel** —
+  `SchemaTable`, `ResultTable` (query results), `EndpointsList`, `ModelPicker`, CSV upload.
+- **Settings → Connections** — the only place a database URL is entered: add / test / remove
+  Postgres (Neon) connections **by name**; the secret posts to the server-side store, never
+  the browser or chat.
+
+---
+
+## 5. The core loop (what a turn looks like)
 
 ```mermaid
 sequenceDiagram
-    participant A as OpenCode
-    participant B as Backend bridge
-    participant U as UI
+    participant U as User (chat)
+    participant B as Backend
+    participant A as OpenCode agent
+    participant D as DuckDB/PG
 
-    A->>B: event permission.asked {requestID, tool, args:{sql}}
-    B->>B: record in approvals store (pending)
-    B-->>U: SSE approval-request {requestID, tool, sql}
-    U-->>U: render ApprovalModal (shows exact SQL/DDL)
-    U->>B: POST /api/approvals/:requestID {action}
-    B->>A: client.permission.reply({requestID, action: "once"|"reject"})
-    B->>B: record approval (audit / lineage)
+    U->>B: "upload loans.csv, then which branch has most overdue?"
+    B->>A: session.prompt (NL)
+    A-->>B: reasoning + tool_use profile_source (SSE)
+    A->>D: read_csv_auto
+    A-->>B: tool_use run_query (read-only) (SSE)
+    A->>D: SELECT branch … ORDER BY overdue DESC
+    A-->>B: assistant text + result rows (SSE)
+    B-->>U: answer + table in the panel
+
+    U->>B: "now publish a daily branch report as an API"
+    A-->>B: tool_use run_transform  → permission.asked (SSE)
+    B-->>U: inline Allow/Deny (shows SQL)
+    U->>B: Allow → permission.reply
+    A->>D: execute → marts.daily_branch_summary
+    A-->>B: tool_use publish_serving → approve → registered
+    B-->>U: "Published: GET /api/serve/daily_branch_summary"
 ```
 
-- Config: `permission: { "*": "allow", "land_parquet": "ask", "load_warehouse": "ask", "run_transform": "ask", "publish_serving": "ask" }`.
-- Reply actions: `"once"` (approve this call), `"reject"` (deny). We deliberately do **not**
-  expose `"always"` in the MVP — the PRD requires **100% approval before execution**.
-- Every asked/replied pair is written to the run's lineage for observability.
+Read tools run freely; write tools stop for inline approval. The agent picks the steps.
 
 ---
 
-## 7. Backend REST surface (MVP)
-
-| Method | Route | Purpose |
-|--------|-------|---------|
-| `POST` | `/api/projects` | Create project (name, domain, volume, warehouse=duckdb). |
-| `GET` | `/api/projects` | List projects. |
-| `POST` | `/api/projects/:id/source` | Upload CSV (multipart) → stores in `uploads/`. |
-| `POST` | `/api/projects/:id/profile` | Run `profile_source`, return profile json. |
-| `POST` | `/api/projects/:id/plan` | Generate plan + artifacts (accepts rules doc). |
-| `GET` | `/api/projects/:id/artifacts` | Fetch generated SQL/DDL/DAG/DQ for review. |
-| `POST` | `/api/projects/:id/run` | Start pipeline run. |
-| `GET` | `/api/runs/:runId/events` | **SSE** — progress + approval-request stream. |
-| `POST` | `/api/approvals/:requestID` | Approve/reject a permission request. |
-| `GET` | `/api/serve/:name` | Dynamically-served result table (generated endpoint). |
-| `GET` | `/api/serve/:name.csv` | Download served table as CSV. |
-| `GET` | `/api/models` | List providers+models from `config.providers()`. |
-
----
-
-## 8. Model routing
-
-- Default: `opencode/big-pickle` (free Zen model) — set in OpenCode config at boot.
-- `GET /api/models` calls `client.config.providers()` → UI model-picker populates live.
-- **Quality-tier toggle:** UI can select any `provider/model`. If a paid provider is
-  chosen, the backend calls `client.auth.set(...)` with the key from env
-  (`ANTHROPIC_API_KEY`, etc.) before prompting; per-run model passed via
-  `session.prompt({ model: { providerID, modelID } })`.
-- **Known risk:** small free models are weaker at multi-step tool use + json_schema
-  output than top-tier paid models. Mitigation: build model-agnostic, dev on `big-pickle`,
-  keep the toggle to a stronger paid model one click away for when the free model flakes. See
-  [`PRD.md` §Risks](./PRD.md).
-
----
-
-## 9. Folder structure
+## 6. Folder structure
 
 ```
-data-engineer-platform/
-├── PRD.md · ARCHITECTURE.md · TASKS.md · PROGRESS.md · AGENTS.md · LOOP.md · PROMPT.md
-├── loop.sh
-├── package.json · tsconfig.json · vitest.config.ts
-├── server/
-│   ├── index.ts                 # boot: createOpencode + Fastify + register tools
-│   ├── core/                    # PURE: schemas (zod), pipeline stage defs, types
-│   │   ├── schemas.ts · pipeline.ts · types.ts
-│   ├── opencode/
-│   │   ├── client.ts            # createOpencode, config, permissions
-│   │   ├── bridge.ts            # event.subscribe → SSE; permission queue
-│   │   └── models.ts            # config.providers wrapper
-│   ├── tools/                   # custom @opencode-ai/plugin tools
-│   │   ├── profile.ts · land.ts · warehouse.ts · transform.ts · dq.ts · serve.ts
-│   ├── pipeline/                # scripted stage runner (profile→plan→run)
-│   ├── routes/                  # projects · sources · runs · approvals · serve · models
-│   ├── store/
-│   │   └── duckdb.ts            # connection + platform-schema migrations
-│   └── serving/                 # dynamic /api/serve/:name registry
-├── web/
-│   └── src/
-│       ├── main.tsx · App.tsx · index.css   # @import "tailwindcss";
-│       ├── pages/  Create · Connect · Plan · Review · Run · Serve
-│       ├── components/  SchemaTable · DagView · ApprovalModal · ProgressStepper · DataTable · ModelPicker
-│       └── lib/  api.ts · sse.ts
-├── data/                        # gitignored
-│   ├── warehouse.duckdb · landing/ · uploads/ · artifacts/
-└── fixtures/                    # synthetic lending CSV + rules doc (committed)
-    ├── loans_sample.csv · rules.txt
+server/
+  core/        pure: zod schemas, sql builders, types
+  opencode/    embedded server, sessions.ts, bridge.ts (SSE), approvals.ts, models.ts
+  tools/       the @opencode-ai/plugin data tools (profile, query, attach_source, land, load,
+               transform, dq, serve)
+  connections/ gitignored server-side secret store + name→url resolution + ATTACH read_only
+  store/       duckdb.ts (platform schema: sessions, messages, sources, connections, runs, lineage, served)
+  routes/      sessions · chat · events(SSE) · sources · approvals · serve · models
+  serving/     dynamic served-table reader
+  app.ts       Fastify wiring · index.ts boots OpenCode + Fastify
+web/src/
+  store/       sessionStore.ts (per-session live state)
+  hooks/       useEvents.ts (SSE)
+  components/  sidebar/ chat/ (ChatStream, MessageBubble, InlineSteps, ToolCard, ApprovalPill,
+               Composer) panel/ (SchemaTable, ResultTable, EndpointsList, ModelPicker, CsvUpload)
+               settings/ (Connections — add/test/remove DB connections by name)
+  App.tsx      layout: sidebar + chat + panel
+data/          warehouse.duckdb · landing/ · uploads/  (gitignored)
+fixtures/      synthetic lending CSV + a seed Postgres script (committed)
 ```
 
-**Discipline (from `useme`):** `server/core` is pure and imported by everything; it never
-imports `routes`/`tools`. TS strict, ESM NodeNext (relative imports end in `.js`).
+`server/core` is pure and imported by everything; ESM NodeNext `.js` imports on the server;
+`web/` uses its own tsconfig and extensionless imports.
 
 ---
 
-## 10. Tech stack (locked for MVP)
+## 7. Reused from v1 vs new
 
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Language | TypeScript (strict, ESM NodeNext) | Matches OpenCode SDK + `useme` conventions |
-| Agent runtime | `@opencode-ai/sdk` + `@opencode-ai/plugin` | The harness we drive, not build |
-| Default model | `opencode/big-pickle` (free) | Prototype cost = 0; model-agnostic |
-| Backend | Fastify + tsx (dev) | Lightweight, proven in `useme` |
-| Frontend | React 19 + Vite + Tailwind v4 | CSS-first Tailwind, fast local dev |
-| DAG view | React Flow *(optional)* | Renders the workflow graph; can start with a simple stepper |
-| Warehouse | DuckDB (`@duckdb/node-api`) | Embedded, zero-setup, Parquet-native |
-| Landing | Local Parquet (DuckDB `COPY`) | "Simulated S3"; swap to MinIO later |
-| Validation | zod | Tool args + API bodies + json_schema |
-| Tests | vitest | Matches `useme` |
-| UI↔server stream | Server-Sent Events | Simpler than WebSockets for one-way progress |
+- **Reuse:** the data tools' DuckDB logic (profile/land/load/transform/dq/serve), the DuckDB
+  store, the OpenCode client wiring, the model catalog, fixtures, Tailwind setup.
+- **Remove:** the 6-step wizard pages and the deterministic pipeline runner.
+- **New:** session manager + persistence, the SSE event bridge, inline approval bridge, the
+  chat UI (sidebar + stream + inline tool/approval rendering), the read-only `run_query`
+  tool, the **Connections settings + gitignored server-side secret store**, and name-based
+  `attach_source` (DuckDB postgres ATTACH read-only, secret never seen by the agent).
 
----
+## 8. Deferred (post-MVP, seams left in)
 
-## 11. What is explicitly deferred (not in MVP)
-
-MinIO / real S3 · Postgres/Snowflake/Spark engines · mock API + Postgres source connectors
-(CSV only for MVP) · scheduling/cron · multi-user/auth · cost estimation · lineage graph UI
-(text lineage only) · streaming/CDC. All have a slot in the tool interfaces so they add
-without a rewrite. See [`PRD.md` §Non-goals](./PRD.md).
+MCP-based connectors (the `tools` plugin + a runtime `client.mcp.add` seam) · Electron
+packaging · non-Postgres databases · writing back to source DBs · scheduling / streaming ·
+multi-user. Each slots behind the existing tool/plugin boundary without a rewrite.

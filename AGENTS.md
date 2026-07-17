@@ -30,6 +30,10 @@ Authoritative references: `PRD.md` (contract) · `ARCHITECTURE.md` (design) ·
   `publish_serving`) is permission `ask` — never downgrade one to `allow`.
 - Synthetic fixtures only; never pipe real data through a free model.
 - Default model is `opencode/big-pickle` (free). Keep everything model-agnostic.
+- **Database credentials never reach the model.** Connection URLs are entered only in the
+  Settings → Connections panel and stored server-side (gitignored). Agent tools take a source
+  **name**; the backend resolves name→URL for `ATTACH … READ_ONLY`. A raw URL/secret must
+  never appear in a prompt, a tool argument the model produces, an SSE event, or the repo.
 
 ## Lessons learned (append, never repeat)
 
