@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { StepShell } from "../components/StepShell";
+import { ModelPicker } from "../components/ModelPicker";
+import { useModelSelection } from "../lib/model-selection";
 import {
   generateDq,
   generatePlan,
@@ -39,6 +41,12 @@ export function PlanPage() {
   const [dq, setDq] = useState<DqSpec | null>(null);
   const [generatingDq, setGeneratingDq] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  /**
+   * The model every generation stage below runs on (FR11), persisted so the Run step records the
+   * same choice on the run. Null means no explicit choice — the request omits the override and the
+   * backend applies its configured default, so the free default lives in one place.
+   */
+  const [model, selectModel] = useModelSelection();
   /**
    * Token for the rules load currently in flight. A save/upload supersedes it: the artifact the
    * user just wrote is newer than whatever the initial `GET /rules` returns, so once a write starts
@@ -143,7 +151,7 @@ export function PlanPage() {
     setError(null);
     setPlan(null);
     try {
-      const result = await generatePlan(projectId);
+      const result = await generatePlan(projectId, model ? { model } : {});
       setPlan(result.plan);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -161,7 +169,7 @@ export function PlanPage() {
     setError(null);
     setTransform(null);
     try {
-      const result = await generateTransform(projectId);
+      const result = await generateTransform(projectId, model ? { model } : {});
       setTransform(result.transform);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -179,7 +187,7 @@ export function PlanPage() {
     setError(null);
     setDq(null);
     try {
-      const result = await generateDq(projectId);
+      const result = await generateDq(projectId, model ? { model } : {});
       setDq(result.dq);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -226,6 +234,12 @@ export function PlanPage() {
             ))}
           </select>
         </div>
+
+        <ModelPicker
+          value={model}
+          onChange={selectModel}
+          disabled={planning || transforming || generatingDq}
+        />
 
         <div>
           <label htmlFor="rules-text" className="block text-sm font-medium text-slate-700">

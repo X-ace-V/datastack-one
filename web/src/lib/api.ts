@@ -5,6 +5,40 @@
  * response, so pages can surface it directly.
  */
 
+/**
+ * One selectable model, mirroring the backend `ModelInfoSchema` (FR11). `ref` is the exact
+ * `provider/model` string handed back to a per-run model override, so the UI never rebuilds it.
+ */
+export interface ModelInfo {
+  ref: string;
+  providerID: string;
+  modelID: string;
+  name: string;
+  toolcall: boolean;
+  reasoning: boolean;
+  /** USD per **1M** tokens. `{ 0, 0 }` is the free tier — see `free`. */
+  cost: { input: number; output: number };
+  free: boolean;
+}
+
+/** One provider and the models it offers, mirroring the backend `ModelProviderSchema`. */
+export interface ModelProvider {
+  id: string;
+  name: string;
+  source: string;
+  models: ModelInfo[];
+}
+
+/**
+ * The live model catalog from `GET /api/models` (FR11), mirroring the backend
+ * `ModelsResponseSchema`. `default` is the platform's configured default (the free model) — what
+ * the backend uses when a request omits a model override.
+ */
+export interface ModelCatalog {
+  default: string;
+  providers: ModelProvider[];
+}
+
 /** A persisted project, mirroring the backend `ProjectSchema`. */
 export interface Project {
   id: string;
@@ -98,6 +132,19 @@ async function errorMessage(res: Response, fallback: string): Promise<string> {
     // Non-JSON body — use the fallback below.
   }
   return `${fallback} (${res.status})`;
+}
+
+/**
+ * Fetch the live model catalog (FR11). The runtime discovers providers from environment keys, so
+ * this lists exactly what is reachable right now: with no provider key set, only the free
+ * `opencode` models come back. A 503 means the agent runtime is not wired.
+ */
+export async function listModels(): Promise<ModelCatalog> {
+  const res = await fetch("/api/models");
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load models"));
+  }
+  return (await res.json()) as ModelCatalog;
 }
 
 /** List all projects, newest first. */

@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { PlanPage } from "./Plan";
-import type { Artifact, Project } from "../lib/api";
+import { MODEL_SELECTION_STORAGE_KEY } from "../lib/model-selection";
+import type { Artifact, ModelCatalog, Project } from "../lib/api";
 
 /**
  * Component test for the rules-input Plan page (T3.1, FR6). `fetch` is mocked so the test
@@ -38,6 +39,40 @@ function makeArtifact(over: Partial<Artifact> = {}): Artifact {
   };
 }
 
+/** The model catalog the page's ModelPicker loads (FR11); free-only, as a keyless runtime returns. */
+const MODELS: ModelCatalog = {
+  default: "opencode/big-pickle",
+  providers: [
+    {
+      id: "opencode",
+      name: "OpenCode Zen",
+      source: "custom",
+      models: [
+        {
+          ref: "opencode/big-pickle",
+          providerID: "opencode",
+          modelID: "big-pickle",
+          name: "Big Pickle",
+          toolcall: true,
+          reasoning: true,
+          cost: { input: 0, output: 0 },
+          free: true,
+        },
+        {
+          ref: "opencode/hy3-free",
+          providerID: "opencode",
+          modelID: "hy3-free",
+          name: "HY3",
+          toolcall: true,
+          reasoning: true,
+          cost: { input: 0, output: 0 },
+          free: true,
+        },
+      ],
+    },
+  ],
+};
+
 function jsonResponse(status: number, body: unknown): Response {
   return {
     ok: status >= 200 && status < 300,
@@ -65,6 +100,9 @@ function installFetch(opts: {
       opts.postCalls.push({ url, method, body: init?.body });
       return opts.onPost();
     }
+    if (url.endsWith("/api/models")) {
+      return jsonResponse(200, MODELS);
+    }
     if (url.endsWith("/rules")) {
       return jsonResponse(200, { rules: opts.currentRules ?? null });
     }
@@ -85,10 +123,14 @@ function renderPage() {
 describe("plan rules page", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
+    // The model selection is persisted (it follows the user to the Run step), so it would
+    // otherwise leak from one test into the next.
+    window.localStorage.clear();
   });
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    window.localStorage.clear();
   });
 
   it("prompts to create a project when none exist", async () => {
@@ -197,6 +239,9 @@ describe("plan rules page", () => {
         if ((init?.method ?? "GET").toUpperCase() === "POST") {
           return jsonResponse(201, makeArtifact({ content: "rules from file" }));
         }
+        if (url.endsWith("/api/models")) {
+          return jsonResponse(200, MODELS);
+        }
         if (url.endsWith("/rules")) {
           await getRulesGate;
           return jsonResponse(200, { rules: null });
@@ -253,6 +298,57 @@ describe("plan rules page", () => {
     expect(postCalls).toHaveLength(1);
     expect(postCalls[0]?.url).toBe("/api/projects/p-1/plan");
     expect(JSON.parse(String(postCalls[0]?.body))).toEqual({});
+  });
+
+  it("sends the picked model with every generation stage", async () => {
+    const postCalls: PostCall[] = [];
+    installFetch({
+      projects: [makeProject()],
+      currentRules: makeArtifact(),
+      onPost: () => jsonResponse(200, { plan: null, transform: null, dq: null }),
+      postCalls,
+    });
+    renderPage();
+
+    // Pick a non-default model, as a user reaching for a different one would.
+    const picker = (await screen.findByLabelText(/^model$/i)) as HTMLSelectElement;
+    await waitFor(() => expect(picker.value).toBe("opencode/big-pickle"));
+    fireEvent.change(picker, { target: { value: "opencode/hy3-free" } });
+    await waitFor(() => expect(picker.value).toBe("opencode/hy3-free"));
+
+    fireEvent.click(screen.getByRole("button", { name: /generate architecture plan/i }));
+    fireEvent.click(screen.getByRole("button", { name: /generate transform sql/i }));
+    fireEvent.click(screen.getByRole("button", { name: /generate dq checks/i }));
+
+    // All three model-driven stages run on the picked model — the picker is not decorative.
+    await waitFor(() => expect(postCalls).toHaveLength(3));
+    expect(postCalls.map((call) => call.url)).toEqual([
+      "/api/projects/p-1/plan",
+      "/api/projects/p-1/transform",
+      "/api/projects/p-1/dq",
+    ]);
+    for (const call of postCalls) {
+      expect(JSON.parse(String(call.body))).toEqual({ model: "opencode/hy3-free" });
+    }
+  });
+
+  it("persists the picked model so the Run step records the same one", async () => {
+    installFetch({
+      projects: [makeProject()],
+      currentRules: null,
+      onPost: () => jsonResponse(200, {}),
+      postCalls: [],
+    });
+    renderPage();
+
+    const picker = (await screen.findByLabelText(/^model$/i)) as HTMLSelectElement;
+    await waitFor(() => expect(picker.value).toBe("opencode/big-pickle"));
+    fireEvent.change(picker, { target: { value: "opencode/hy3-free" } });
+
+    // The wizard's steps are separate routes, so the choice has to outlive this page.
+    await waitFor(() =>
+      expect(window.localStorage.getItem(MODEL_SELECTION_STORAGE_KEY)).toBe("opencode/hy3-free"),
+    );
   });
 
   it("generates a transform and renders its SQL, assumptions and questions", async () => {

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { StepShell } from "../components/StepShell";
 import { ProgressStepper } from "../components/ProgressStepper";
 import { ApprovalModal } from "../components/ApprovalModal";
+import { useModelSelection } from "../lib/model-selection";
 import {
   getRunState,
   listProjects,
@@ -40,6 +41,13 @@ export function RunPage() {
   const [deciding, setDeciding] = useState(false);
   const [history, setHistory] = useState<Run[]>([]);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The model chosen on the Plan step (FR11), recorded on the run for lineage. The runner itself
+   * calls no model — it executes the SQL the human already reviewed — so this is provenance, not
+   * a setting that changes what the run does. Chosen there rather than here because that is where
+   * it does the work: it is the model that generated the artifacts this run executes.
+   */
+  const [model] = useModelSelection();
 
   // Load projects on mount and default the selection to the newest one.
   useEffect(() => {
@@ -130,7 +138,7 @@ export function RunPage() {
     setSteps([]);
     setRun(null);
     try {
-      const result = await startRun(projectId);
+      const result = await startRun(projectId, model ? { model } : {});
       setRun(result.run);
       setSteps(result.steps);
       setStatus(result.run.status);
@@ -210,6 +218,16 @@ export function RunPage() {
           <p className="mt-2 text-xs text-slate-500">
             The pipeline pauses at every write step and shows the exact SQL for approval before it
             runs.
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            Recorded for lineage:{" "}
+            <span className="font-mono text-slate-700">{model ?? "platform default"}</span> — the
+            model that generated the artifacts. The run itself executes your reviewed SQL
+            deterministically and calls no model;{" "}
+            <Link to="/plan" className="font-medium text-indigo-600 hover:underline">
+              change it on the Plan step
+            </Link>
+            .
           </p>
         </div>
 

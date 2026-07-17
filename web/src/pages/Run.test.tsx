@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { RunPage } from "./Run";
+import { MODEL_SELECTION_STORAGE_KEY } from "../lib/model-selection";
 import type {
   Project,
   Run,
@@ -123,6 +124,8 @@ interface FetchOpts {
 
 function installFetch(opts: FetchOpts = {}) {
   const approvalCalls: Array<{ url: string; action: string }> = [];
+  /** Bodies posted to `POST /api/projects/:id/run` — where the per-run model is recorded. */
+  const runCalls: unknown[] = [];
   const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/approvals/")) {
@@ -131,6 +134,7 @@ function installFetch(opts: FetchOpts = {}) {
       return jsonResponse(200, { requestID: "x", action: body.action, status: "approved" });
     }
     if (url.endsWith("/run")) {
+      runCalls.push(JSON.parse(String(init?.body ?? "{}")));
       return (opts.runResponse ?? (() => jsonResponse(202, { run: RUN, steps: STEPS })))();
     }
     // The project's run history (`/api/projects/:id/runs`) — checked before the run-state route
@@ -144,7 +148,7 @@ function installFetch(opts: FetchOpts = {}) {
     return jsonResponse(200, { projects: opts.projects ?? [makeProject()] });
   });
   vi.stubGlobal("fetch", fetchMock);
-  return { fetchMock, approvalCalls };
+  return { fetchMock, approvalCalls, runCalls };
 }
 
 function renderPage() {
@@ -172,16 +176,51 @@ describe("run page", () => {
   beforeEach(() => {
     FakeEventSource.instances = [];
     vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
+    // The model selection is persisted across wizard steps, so it would leak between tests.
+    window.localStorage.clear();
   });
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    window.localStorage.clear();
   });
 
   it("prompts to create a project when none exist", async () => {
     installFetch({ projects: [] });
     renderPage();
     expect(await screen.findByText(/create a project first/i)).toBeTruthy();
+  });
+
+  it("records the model picked on the Plan step when starting the run", async () => {
+    window.localStorage.setItem(MODEL_SELECTION_STORAGE_KEY, "anthropic/claude-opus-4-5");
+    const { runCalls } = installFetch();
+    renderPage();
+
+    const start = (await screen.findByRole("button", { name: /start run/i })) as HTMLButtonElement;
+    // The model that generated the artifacts is named on the page before the run starts.
+    await waitFor(() => expect(screen.getByText("anthropic/claude-opus-4-5")).toBeTruthy());
+    await act(async () => {
+      fireEvent.click(start);
+    });
+
+    // FR11's per-run model: the run row records which model produced what it executes.
+    await waitFor(() => expect(runCalls).toHaveLength(1));
+    expect(runCalls[0]).toEqual({ model: "anthropic/claude-opus-4-5" });
+  });
+
+  it("omits the model when none was picked, leaving the backend on its default", async () => {
+    const { runCalls } = installFetch();
+    renderPage();
+
+    const start = (await screen.findByRole("button", { name: /start run/i })) as HTMLButtonElement;
+    await waitFor(() => expect(screen.getByText("platform default")).toBeTruthy());
+    await act(async () => {
+      fireEvent.click(start);
+    });
+
+    // No selection must not name a model here — the platform default lives on the server.
+    await waitFor(() => expect(runCalls).toHaveLength(1));
+    expect(runCalls[0]).toEqual({});
   });
 
   it("drives a run to success, approving each gated stage with the exact SQL shown", async () => {

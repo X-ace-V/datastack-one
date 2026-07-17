@@ -130,6 +130,33 @@ describe("run routes", () => {
       expect(state?.steps).toHaveLength(6);
     });
 
+    it("records the per-run model on the run, and null when none is sent", async () => {
+      const { store, projectId } = await seeded();
+      const { launchRun } = spyLauncher();
+      const app = buildServer({ store, launchRun });
+
+      // FR11: the model the UI picked for generation is recorded on the run it produced (T6.3).
+      const picked = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/run`,
+        payload: { model: "anthropic/claude-opus-4-5" },
+      });
+      expect(picked.statusCode).toBe(202);
+      expect(picked.json().run.model).toBe("anthropic/claude-opus-4-5");
+      // Persisted, not just echoed back to the caller.
+      const stored = await getRunState(store, picked.json().run.id);
+      expect(stored?.run.model).toBe("anthropic/claude-opus-4-5");
+
+      // No explicit choice stays null so the runtime's own default applies — the UI never
+      // duplicates the platform default by naming it here.
+      const defaulted = await app.inject({
+        method: "POST",
+        url: `/api/projects/${projectId}/run`,
+        payload: {},
+      });
+      expect(defaulted.json().run.model).toBeNull();
+    });
+
     it("404s an unknown project and a cross-project source", async () => {
       const { store, projectId } = await seeded();
       const { launchRun } = spyLauncher();

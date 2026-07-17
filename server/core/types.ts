@@ -38,7 +38,7 @@ export const ModelInfoSchema = z.object({
   toolcall: z.boolean(),
   /** Whether the model exposes reasoning output. */
   reasoning: z.boolean(),
-  /** Per-token cost in USD; `{0, 0}` marks a free model. */
+  /** Cost in USD per 1M tokens; `{0, 0}` marks a free model. */
   cost: z.object({ input: z.number().nonnegative(), output: z.number().nonnegative() }),
   /** True when both input and output cost are zero (the free tier). */
   free: z.boolean(),
