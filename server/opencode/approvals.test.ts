@@ -9,41 +9,44 @@ import {
 import { ApprovalRequestSchema } from "../core/approvals.js";
 
 /**
- * Unit tests for the permission bridge / approval gate (T1.4, FR8). The gate is driven by
+ * Unit tests for the permission bridge / approval gate (V1.6, FR8). The gate is driven by
  * hand-built runtime events (no `opencode` subprocess) and a mocked reply client so we can
- * assert the *desired* behavior: a `permission.updated` becomes a schema-valid pending
+ * assert the *desired* behavior: a `permission.asked` becomes a schema-valid pending
  * request; approve replies `once` and reject replies `reject` against the right session;
  * a resolved request leaves the queue; an unknown id 404s and a runtime failure keeps the
  * request pending. See LOOP.md §5 — assert values/invariants, not just "it ran".
+ *
+ * The event shapes are the live opencode v2 runtime contract (`permission.asked` /
+ * `permission.replied`), verified against opencode 1.18.3 in the V1.6 smoke — not the
+ * `@opencode-ai/sdk` v1 `Event` types.
  */
 
-/** A `permission.updated` event for `requestID` on `sessionID`, carrying `sql` metadata. */
+/** A `permission.asked` event for `requestID` on `sessionID`, carrying `sql` metadata. */
 function askedEvent(
   requestID: string,
   sessionID: string,
   overrides: Record<string, unknown> = {},
 ): Event {
   return {
-    type: "permission.updated",
+    type: "permission.asked",
     properties: {
       id: requestID,
-      type: "run_transform",
       sessionID,
-      messageID: "msg_1",
-      callID: "call_1",
-      title: "Execute transform SQL",
+      permission: "run_transform",
+      patterns: ["marts.report"],
       metadata: { sql: "CREATE TABLE marts.report AS SELECT 1" },
-      time: { created: 1_700_000_000_000 },
+      always: [],
+      tool: { messageID: "msg_1", callID: "call_1" },
       ...overrides,
     },
   } as unknown as Event;
 }
 
-/** A `permission.replied` event, as the runtime emits once a request is answered. */
+/** A `permission.replied` event (v2 contract: `requestID` + `reply`) once a request is answered. */
 function repliedEvent(requestID: string, sessionID: string): Event {
   return {
     type: "permission.replied",
-    properties: { sessionID, permissionID: requestID, response: "once" },
+    properties: { sessionID, requestID, reply: "once" },
   } as unknown as Event;
 }
 
@@ -64,7 +67,7 @@ function mockClient(fail = false) {
 }
 
 describe("createApprovalGate", () => {
-  it("captures a permission.updated event as a schema-valid pending request", () => {
+  it("captures a permission.asked event as a schema-valid pending request", () => {
     const { client } = mockClient();
     const gate = createApprovalGate(client);
 
@@ -78,8 +81,8 @@ describe("createApprovalGate", () => {
     expect(req.sessionID).toBe("ses_1");
     expect(req.type).toBe("run_transform");
     expect(req.callID).toBe("call_1");
+    expect(req.patterns).toEqual(["marts.report"]);
     expect(req.metadata).toEqual({ sql: "CREATE TABLE marts.report AS SELECT 1" });
-    expect(req.createdAt).toBe(1_700_000_000_000);
     expect(gate.get("perm_1")).toEqual(req);
   });
 

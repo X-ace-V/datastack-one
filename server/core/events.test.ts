@@ -79,13 +79,15 @@ describe("formatSseFrame", () => {
  * browser store that would mis-render it.
  */
 describe("NormalizedEventSchema", () => {
-  it("enumerates exactly the five chat-event kinds", () => {
+  it("enumerates exactly the seven chat-event kinds", () => {
     expect([...NORMALIZED_EVENT_KINDS]).toEqual([
       "text",
       "reasoning",
       "tool",
       "idle",
       "error",
+      "approval",
+      "approval_resolved",
     ]);
   });
 
@@ -136,6 +138,42 @@ describe("NormalizedEventSchema", () => {
   it("rejects an unknown kind", () => {
     expect(
       NormalizedEventSchema.safeParse({ kind: "status", sessionID: "s" }).success,
+    ).toBe(false);
+  });
+
+  it("accepts an approval event carrying the request's metadata (FR10)", () => {
+    const approval: NormalizedEvent = {
+      kind: "approval",
+      sessionID: "s",
+      requestID: "perm_1",
+      type: "run_transform",
+      callID: "call_1",
+      patterns: ["marts.report"],
+      metadata: { sql: "CREATE TABLE marts.report AS SELECT 1" },
+    };
+    expect(NormalizedEventSchema.parse(approval)).toEqual(approval);
+  });
+
+  it("accepts an approval_resolved event with either terminal status", () => {
+    const approved: NormalizedEvent = {
+      kind: "approval_resolved",
+      sessionID: "s",
+      requestID: "perm_1",
+      status: "approved",
+    };
+    const rejected: NormalizedEvent = { ...approved, status: "rejected" };
+    expect(NormalizedEventSchema.parse(approved)).toEqual(approved);
+    expect(NormalizedEventSchema.parse(rejected)).toEqual(rejected);
+  });
+
+  it("rejects an approval_resolved event with an unknown status", () => {
+    expect(
+      NormalizedEventSchema.safeParse({
+        kind: "approval_resolved",
+        sessionID: "s",
+        requestID: "perm_1",
+        status: "maybe",
+      }).success,
     ).toBe(false);
   });
 });

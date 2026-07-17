@@ -63,6 +63,19 @@ function idle(sessionID: string): NormalizedEvent {
   return { kind: "idle", sessionID };
 }
 
+/** An inline approval event (a paused write tool) for the given session. */
+function approval(requestID: string, sessionID: string): NormalizedEvent {
+  return {
+    kind: "approval",
+    sessionID,
+    requestID,
+    type: "run_transform",
+    callID: "call_1",
+    patterns: ["marts.report"],
+    metadata: { sql: "CREATE TABLE marts.report AS SELECT 1" },
+  };
+}
+
 /** Read from an SSE body stream until the buffered text contains `needle`, then return it. */
 async function readerUntil(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -204,6 +217,46 @@ describe("GET /api/events", () => {
       expect(wire).toContain("id: 2");
       expect(wire).toContain('"sessionID":"s1"');
       expect(wire).not.toContain('"sessionID":"s2"');
+
+      await reader.cancel();
+      controller.abort();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("streams an inline approval on the `approval` channel with its SQL (FR10)", async () => {
+    const src = fakeBridge();
+    const app = buildServer({ events: createEventHub(src.bridge) });
+    const address = await app.listen({ port: 0, host: "127.0.0.1" });
+
+    try {
+      const controller = new AbortController();
+      const res = await fetch(`${address}/api/events?sessionId=s1`, {
+        headers: { accept: "text/event-stream" },
+        signal: controller.signal,
+      });
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      const state = { buffered: "" };
+      await readerUntil(reader, decoder, state, ": connected");
+
+      // A write tool pauses for approval → the browser sees it inline on the `approval` channel.
+      src.emit(approval("perm_1", "s1"));
+      const asked = await readerUntil(reader, decoder, state, "event: approval");
+      expect(asked).toContain('"requestID":"perm_1"');
+      expect(asked).toContain("CREATE TABLE marts.report AS SELECT 1");
+
+      // Its resolution clears the pill on the `approval_resolved` channel.
+      src.emit({
+        kind: "approval_resolved",
+        sessionID: "s1",
+        requestID: "perm_1",
+        status: "approved",
+      });
+      const resolved = await readerUntil(reader, decoder, state, "event: approval_resolved");
+      expect(resolved).toContain('"requestID":"perm_1"');
+      expect(resolved).toContain('"status":"approved"');
 
       await reader.cancel();
       controller.abort();

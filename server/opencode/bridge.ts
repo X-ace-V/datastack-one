@@ -1,4 +1,9 @@
 import type { Event, OpencodeClient, Part } from "@opencode-ai/sdk";
+import {
+  toApprovalRequest,
+  type PermissionAskedProperties,
+  type PermissionRepliedProperties,
+} from "../core/approvals.js";
 import type { NormalizedEvent } from "../core/events.js";
 
 /**
@@ -6,7 +11,7 @@ import type { NormalizedEvent } from "../core/events.js";
  * the runtime's global event stream, maps each raw event to a {@link NormalizedEvent} (text
  * delta / reasoning / tool-call w/ status / idle / error) via {@link normalizeEvent}, and
  * fans the normalized events out to its subscribers. It also exposes every raw event via
- * `onRawEvent` so the permission gate (V1.6) can read `permission.updated` off the same
+ * `onRawEvent` so the permission gate (V1.6) can read `permission.asked` off the same
  * single pump — the platform reads `event.subscribe()` exactly once. The per-session
  * routing + replay buffer over these normalized events is the SSE route (V1.5). See
  * ARCHITECTURE §6.
@@ -83,11 +88,42 @@ function normalizePart(part: Part): NormalizedEvent | null {
 /**
  * Map one raw OpenCode event to the normalized chat event the UI renders, or `null` when
  * the event is not part of the chat stream (message envelopes, session status, file
- * watchers, permission events — those go to the approval gate, not here). Pure and total:
- * this is the mapping V1.4 unit-tests. A `session.error` with no session id can't be routed
- * per session, so it is dropped rather than emitted unattributed.
+ * watchers). Pure and total: this is the mapping the bridge unit-tests.
+ *
+ * A `permission.asked` becomes an inline `approval` (V1.6/FR10) and `permission.replied` its
+ * `approval_resolved`, so a paused write tool surfaces in the same sequenced stream as
+ * text/tool events — the approval gate ({@link file://./approvals.ts}) still captures the
+ * queue separately off the raw pump. These are the live opencode v2 permission events, which
+ * are NOT in the `@opencode-ai/sdk` v1 `Event` union (the SDK types name `permission.updated`,
+ * which the running server never emits), so they are matched on the raw type string and read
+ * via the verified {@link PermissionAskedProperties}/{@link PermissionRepliedProperties} shapes
+ * (see {@link file://../core/approvals.ts}). A `session.error` (or a permission event) with no
+ * session id can't be routed per session, so it is dropped rather than emitted unattributed.
  */
 export function normalizeEvent(event: Event): NormalizedEvent | null {
+  // Permission events (v2 runtime contract) fall outside the v1 `Event` type union, so match
+  // them on the raw type string before the typed switch and read their real properties.
+  const raw = event as unknown as { type: string; properties: unknown };
+  if (raw.type === "permission.asked") {
+    const props = raw.properties as PermissionAskedProperties;
+    // The runtime asks a human before a write tool runs (FR8/FR10). Surface it inline,
+    // carrying the metadata (exact SQL/DDL) the UI shows before approving. An unroutable
+    // request (no session/id) is dropped rather than emitted unattributed.
+    if (!props?.sessionID || !props?.id) return null;
+    return { kind: "approval", ...toApprovalRequest(props) };
+  }
+  if (raw.type === "permission.replied") {
+    const props = raw.properties as PermissionRepliedProperties;
+    // The request was answered (here or by another client) — clear the inline pill.
+    if (!props?.sessionID || !props?.requestID) return null;
+    return {
+      kind: "approval_resolved",
+      sessionID: props.sessionID,
+      requestID: props.requestID,
+      status: props.reply === "reject" ? "rejected" : "approved",
+    };
+  }
+
   switch (event.type) {
     case "message.part.updated":
       return normalizePart(event.properties.part);
@@ -124,7 +160,7 @@ export interface EventBridge {
 export interface EventBridgeOptions {
   /**
    * Observer for every raw event read from the runtime, before normalization. The permission
-   * gate (FR8/FR10) hooks here to see `permission.updated`/`permission.replied`, and boot
+   * gate (FR8/FR10) hooks here to see `permission.asked`/`permission.replied`, and boot
    * smoke tests hook here to observe the live stream — so `event.subscribe()` is read once.
    */
   onRawEvent?: (event: Event) => void;

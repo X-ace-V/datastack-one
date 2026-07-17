@@ -29,19 +29,18 @@ function mockClient(fail = false) {
   return { client, calls };
 }
 
-/** A `permission.updated` event the gate captures into its pending queue. */
+/** A `permission.asked` event (live v2 runtime shape) the gate captures into its queue. */
 function askedEvent(requestID: string, sessionID: string): Event {
   return {
-    type: "permission.updated",
+    type: "permission.asked",
     properties: {
       id: requestID,
-      type: "run_transform",
       sessionID,
-      messageID: "msg_1",
-      callID: "call_1",
-      title: "Execute transform SQL",
+      permission: "run_transform",
+      patterns: ["marts.report"],
       metadata: { sql: "SELECT 1" },
-      time: { created: 1_700_000_000_000 },
+      always: [],
+      tool: { messageID: "msg_1", callID: "call_1" },
     },
   } as unknown as Event;
 }

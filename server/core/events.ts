@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ApprovalRequestSchema } from "./approvals.js";
 
 /**
  * Pure SSE (Server-Sent Events) framing + the normalized chat-event contract. The OpenCode
@@ -36,11 +37,14 @@ export function formatSseFrame(frame: SseFrame): string {
 }
 
 /**
- * The normalized event kinds surfaced to the chat UI (PRD FR2/FR3): streamed assistant
- * `text`, agent `reasoning`, a `tool` call with its status, the turn going `idle`, and a
- * turn `error`. Every other raw OpenCode event (message envelopes, session status, file
- * watchers, permission events — handled by the approval bridge) maps to `null` and is not
- * relayed to the chat stream.
+ * The normalized event kinds surfaced to the chat UI (PRD FR2/FR3/FR10): streamed assistant
+ * `text`, agent `reasoning`, a `tool` call with its status, the turn going `idle`, a turn
+ * `error`, an inline `approval` request pausing a write tool, and its `approval_resolved`
+ * once a human answers. The `approval`/`approval_resolved` pair rides the SAME sequenced chat
+ * stream as the other kinds so the approval pill renders inline, in reading order, next to the
+ * tool call it gates (FR10) — and a reconnecting client replays a still-pending request via
+ * `?lastSeq`. Every other raw OpenCode event (message envelopes, session status, file watchers)
+ * maps to `null` and is not relayed.
  */
 export const NORMALIZED_EVENT_KINDS = [
   "text",
@@ -48,6 +52,8 @@ export const NORMALIZED_EVENT_KINDS = [
   "tool",
   "idle",
   "error",
+  "approval",
+  "approval_resolved",
 ] as const;
 export type NormalizedEventKind = (typeof NORMALIZED_EVENT_KINDS)[number];
 
@@ -138,6 +144,36 @@ export const ErrorEventSchema = z.object({
 export type ErrorEvent = z.infer<typeof ErrorEventSchema>;
 
 /**
+ * A write tool has paused for a human decision (FR8/FR10). Carries exactly the still-pending
+ * {@link ApprovalRequestSchema} the approval gate captured — the `requestID` to answer, the
+ * `type` (gated tool/surface) for display, and the `metadata` holding the exact SQL/DDL the
+ * human reviews — tagged with the `approval` kind so it rides the chat stream. A source is
+ * referenced by name, never a URL (FR5b), so nothing secret ever reaches this event. The UI
+ * answers it via `POST /api/approvals/:requestID`; the {@link ApprovalResolvedEventSchema}
+ * (from the runtime's `permission.replied`) clears it.
+ */
+export const ApprovalEventSchema = ApprovalRequestSchema.extend({
+  kind: z.literal("approval"),
+});
+export type ApprovalEvent = z.infer<typeof ApprovalEventSchema>;
+
+/**
+ * A pending approval was answered (FR10) — the runtime raised `permission.replied`, so every
+ * connected client clears the inline pill for `requestID`, whether this browser answered it or
+ * another. `status` reflects the decision: `approved` (the tool runs once) or `rejected` (it is
+ * aborted). Emitted for the gate's `approve`/`reject`; a blanket `always` is never sent (FR8).
+ */
+export const ApprovalResolvedEventSchema = z.object({
+  ...baseFields,
+  kind: z.literal("approval_resolved"),
+  /** The permission id that was answered — the key the UI clears its pending pill by. */
+  requestID: z.string().min(1),
+  /** Terminal decision: an approval was recorded, or the step was rejected. */
+  status: z.enum(["approved", "rejected"]),
+});
+export type ApprovalResolvedEvent = z.infer<typeof ApprovalResolvedEventSchema>;
+
+/**
  * The normalized chat event delivered over `GET /api/events` (FR3). A discriminated union
  * on `kind` so the browser store can switch on it exhaustively, and every member carries a
  * `sessionID` so the SSE route can fan it out to the right session's subscribers.
@@ -148,6 +184,8 @@ export const NormalizedEventSchema = z.discriminatedUnion("kind", [
   ToolEventSchema,
   IdleEventSchema,
   ErrorEventSchema,
+  ApprovalEventSchema,
+  ApprovalResolvedEventSchema,
 ]);
 export type NormalizedEvent = z.infer<typeof NormalizedEventSchema>;
 

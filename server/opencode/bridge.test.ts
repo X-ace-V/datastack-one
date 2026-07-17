@@ -66,6 +66,35 @@ function partEvent(part: unknown): Event {
   } as unknown as Event;
 }
 
+/**
+ * A `permission.asked` event (a write tool asking for approval), carrying its `sql` metadata.
+ * The shape mirrors the live opencode v2 runtime contract verified in the V1.6 smoke: the
+ * permission id under `id`, the gated surface under `permission`, args under `metadata`, and a
+ * tool-originated call's `callID` nested under `tool`.
+ */
+function askedEvent(requestID: string, sessionID: string): Event {
+  return {
+    type: "permission.asked",
+    properties: {
+      id: requestID,
+      sessionID,
+      permission: "run_transform",
+      patterns: ["marts.report"],
+      metadata: { sql: "CREATE TABLE marts.report AS SELECT 1" },
+      always: [],
+      tool: { messageID: "msg_1", callID: "call_1" },
+    },
+  } as unknown as Event;
+}
+
+/** A `permission.replied` event (v2 contract: `requestID` + `reply`), as the runtime emits it. */
+function repliedEvent(requestID: string, sessionID: string, reply: string): Event {
+  return {
+    type: "permission.replied",
+    properties: { sessionID, requestID, reply },
+  } as unknown as Event;
+}
+
 describe("normalizeEvent", () => {
   it("maps a text part to a text event keyed by session/message/part", () => {
     const event = partEvent({
@@ -225,8 +254,40 @@ describe("normalizeEvent", () => {
     expect(normalizeEvent(event)).toBeNull();
   });
 
-  it("drops non-chat event types (permission/status/file are not chat stream)", () => {
-    for (const type of ["permission.updated", "session.status", "message.updated", "server.connected", "file.watcher.updated"]) {
+  it("maps permission.asked to an inline approval carrying the SQL metadata (FR10)", () => {
+    expect(normalizeEvent(askedEvent("perm_1", "ses_1"))).toEqual({
+      kind: "approval",
+      sessionID: "ses_1",
+      requestID: "perm_1",
+      type: "run_transform",
+      callID: "call_1",
+      patterns: ["marts.report"],
+      metadata: { sql: "CREATE TABLE marts.report AS SELECT 1" },
+    });
+  });
+
+  it("maps permission.replied 'once'/'always' to an approved resolution", () => {
+    for (const reply of ["once", "always"]) {
+      expect(normalizeEvent(repliedEvent("perm_1", "ses_1", reply))).toEqual({
+        kind: "approval_resolved",
+        sessionID: "ses_1",
+        requestID: "perm_1",
+        status: "approved",
+      });
+    }
+  });
+
+  it("maps permission.replied 'reject' to a rejected resolution", () => {
+    expect(normalizeEvent(repliedEvent("perm_2", "ses_1", "reject"))).toEqual({
+      kind: "approval_resolved",
+      sessionID: "ses_1",
+      requestID: "perm_2",
+      status: "rejected",
+    });
+  });
+
+  it("drops non-chat event types (status/message/file are not chat stream)", () => {
+    for (const type of ["session.status", "message.updated", "server.connected", "file.watcher.updated"]) {
       const event = { type, properties: { sessionID: "ses_1" } } as unknown as Event;
       expect(normalizeEvent(event)).toBeNull();
     }
@@ -250,6 +311,8 @@ describe("normalizeEvent", () => {
         type: "session.error",
         properties: { sessionID: "s", error: { name: "UnknownError", data: { message: "x" } } },
       } as unknown as Event,
+      askedEvent("perm_1", "s"),
+      repliedEvent("perm_1", "s", "once"),
     ];
     for (const event of cases) {
       const normalized = normalizeEvent(event);
@@ -282,11 +345,42 @@ describe("createEventBridge", () => {
     const seen: unknown[] = [];
     bridge.subscribe((e) => seen.push(e));
 
-    src.push({ type: "permission.updated", properties: { sessionID: "ses_A" } } as unknown as Event);
+    src.push({ type: "message.updated", properties: { sessionID: "ses_A" } } as unknown as Event);
     src.push({ type: "server.connected", properties: {} } as unknown as Event);
     await flush();
 
     expect(seen).toEqual([]);
+    await bridge.close();
+  });
+
+  it("delivers a permission.asked to subscribers as an inline approval (SSE seam, FR10)", async () => {
+    const src = makeEventStream();
+    const bridge = createEventBridge(mockClient(src.stream));
+    const seen: unknown[] = [];
+    bridge.subscribe((e) => seen.push(e));
+
+    src.push(askedEvent("perm_1", "ses_A"));
+    src.push(repliedEvent("perm_1", "ses_A", "once"));
+    await flush();
+
+    // The paused write tool and its resolution both ride the normalized chat stream.
+    expect(seen).toEqual([
+      {
+        kind: "approval",
+        sessionID: "ses_A",
+        requestID: "perm_1",
+        type: "run_transform",
+        callID: "call_1",
+        patterns: ["marts.report"],
+        metadata: { sql: "CREATE TABLE marts.report AS SELECT 1" },
+      },
+      {
+        kind: "approval_resolved",
+        sessionID: "ses_A",
+        requestID: "perm_1",
+        status: "approved",
+      },
+    ]);
     await bridge.close();
   });
 
@@ -317,12 +411,12 @@ describe("createEventBridge", () => {
     });
     bridge.subscribe((e) => normalized.push(e));
 
-    src.push({ type: "permission.updated", properties: { sessionID: "ses_A" } } as unknown as Event);
+    src.push({ type: "message.updated", properties: { sessionID: "ses_A" } } as unknown as Event);
     src.push({ type: "session.idle", properties: { sessionID: "ses_A" } } as unknown as Event);
     await flush();
 
-    // Raw pump sees BOTH (the approval gate needs permission.updated); only the idle is chat.
-    expect(raw).toEqual(["permission.updated", "session.idle"]);
+    // Raw pump sees BOTH (the message envelope carries role, read elsewhere); only idle is chat.
+    expect(raw).toEqual(["message.updated", "session.idle"]);
     expect(normalized).toEqual([{ kind: "idle", sessionID: "ses_A" }]);
     await bridge.close();
   });
