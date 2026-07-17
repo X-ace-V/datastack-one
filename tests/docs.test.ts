@@ -114,7 +114,7 @@ describe("documented API routes are registered", async () => {
   const documented = new Set<string>();
   for (const doc of DOCS) {
     for (const span of inlineCodeSpans(docText[doc])) {
-      const m = /^(GET|POST) (\/api\/\S*)$/.exec(span.trim());
+      const m = /^(GET|POST|PATCH|DELETE) (\/api\/\S*)$/.exec(span.trim());
       if (m) documented.add(`${group(m, 1)} ${group(m, 2)}`);
     }
   }
@@ -142,7 +142,12 @@ describe("documented API routes are registered", async () => {
     const separator = route.indexOf(" ");
     const method = route.slice(0, separator);
     const url = route.slice(separator + 1);
-    expect(app.hasRoute({ method: method as "GET" | "POST", url })).toBe(true);
+    expect(
+      app.hasRoute({
+        method: method as "GET" | "POST" | "PATCH" | "DELETE",
+        url,
+      }),
+    ).toBe(true);
   });
 
   it("documents no route that does not exist", () => {

@@ -4,6 +4,10 @@ import multipart from "@fastify/multipart";
 import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
 import { ApprovalDecisionSchema } from "./core/approvals.js";
 import { CreateProjectRequestSchema } from "./core/projects.js";
+import {
+  CreateSessionRequestSchema,
+  RenameSessionRequestSchema,
+} from "./core/sessions.js";
 import { ProfileRequestSchema } from "./core/profile.js";
 import { RulesInputSchema } from "./core/artifacts.js";
 import { isCsvFilename } from "./core/sources.js";
@@ -32,6 +36,7 @@ import {
   UnknownApprovalError,
   type ApprovalGate,
 } from "./opencode/approvals.js";
+import { SessionManager, SessionRuntimeError } from "./opencode/sessions.js";
 
 /** Backend identity, surfaced by `/api/health` so a client can confirm the target. */
 export const SERVICE_NAME = "datastack-one";
@@ -55,6 +60,12 @@ export interface ServerDeps {
    * 503, since a health-only boot has no warehouse to persist to.
    */
   store?: WarehouseStore;
+  /**
+   * SessionManager backing the chat-session routes (FR1). It orchestrates the OpenCode
+   * runtime and the `platform` store, so a health-only boot (no runtime) leaves it absent
+   * and the session routes report 503.
+   */
+  sessions?: SessionManager;
   /**
    * Directory uploaded CSVs are written to (FR2). Defaults to {@link DEFAULT_UPLOADS_DIR};
    * tests override it with a tmp dir so they never touch the repo's `data/`.
@@ -105,6 +116,119 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     }
     return await listModels(deps.opencode);
   });
+
+  // FR1: create a chat session. Opens an OpenCode session and persists it under its id via
+  // the SessionManager. Body (both fields optional) is validated against the shared contract
+  // (400); a runtime failure to open the OpenCode session is a 502 (nothing is persisted).
+  // On success the persisted row — with its OpenCode id, title, and null-or-chosen model — is
+  // returned with 201. Status map: 503 unwired, 400 bad body, 502 runtime, 201 created.
+  app.post("/api/sessions", async (req, reply) => {
+    if (!deps.sessions) {
+      return reply.code(503).send({ error: "session manager unavailable" });
+    }
+
+    const parsed = CreateSessionRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid session", details: parsed.error.issues });
+    }
+
+    try {
+      const session = await deps.sessions.create(parsed.data);
+      return reply.code(201).send(session);
+    } catch (err) {
+      if (err instanceof SessionRuntimeError) {
+        return reply.code(502).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
+  // FR1: list all chat sessions, most recently active first, for the sidebar (V2.3).
+  // Status map: 503 unwired, 200 with the list.
+  app.get("/api/sessions", async (_req, reply) => {
+    if (!deps.sessions) {
+      return reply.code(503).send({ error: "session manager unavailable" });
+    }
+    return reply.code(200).send({ sessions: await deps.sessions.list() });
+  });
+
+  // FR1: fetch a single session together with its ordered message history — the shape a
+  // reopen needs to restore the transcript in one call. Status map: 503 unwired, 404 unknown
+  // session, 200 the session with its `messages`.
+  app.get<{ Params: { id: string } }>(
+    "/api/sessions/:id",
+    async (req, reply) => {
+      if (!deps.sessions) {
+        return reply.code(503).send({ error: "session manager unavailable" });
+      }
+      const session = await deps.sessions.get(req.params.id);
+      if (!session) {
+        return reply.code(404).send({ error: "session not found" });
+      }
+      return reply.code(200).send(session);
+    },
+  );
+
+  // FR1: rename a session. The title is required (400 otherwise); the manager checks the
+  // store before touching the runtime, so an unknown id is a clean 404 that never hits
+  // OpenCode. A runtime failure to rename is a 502. Status map: 503 unwired, 400 bad body,
+  // 404 unknown, 502 runtime, 200 the updated session.
+  app.patch<{ Params: { id: string } }>(
+    "/api/sessions/:id",
+    async (req, reply) => {
+      if (!deps.sessions) {
+        return reply.code(503).send({ error: "session manager unavailable" });
+      }
+
+      const parsed = RenameSessionRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid rename", details: parsed.error.issues });
+      }
+
+      try {
+        const session = await deps.sessions.rename(req.params.id, parsed.data.title);
+        if (!session) {
+          return reply.code(404).send({ error: "session not found" });
+        }
+        return reply.code(200).send(session);
+      } catch (err) {
+        if (err instanceof SessionRuntimeError) {
+          return reply.code(502).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // FR1: delete a session and its entire message history. The manager checks the store first,
+  // so an unknown id is a 404 that never hits the runtime; a runtime failure to delete is a
+  // 502. On success there is nothing to return — 204 No Content. Status map: 503 unwired,
+  // 404 unknown, 502 runtime, 204 deleted.
+  app.delete<{ Params: { id: string } }>(
+    "/api/sessions/:id",
+    async (req, reply) => {
+      if (!deps.sessions) {
+        return reply.code(503).send({ error: "session manager unavailable" });
+      }
+
+      try {
+        const existed = await deps.sessions.delete(req.params.id);
+        if (!existed) {
+          return reply.code(404).send({ error: "session not found" });
+        }
+        return reply.code(204).send();
+      } catch (err) {
+        if (err instanceof SessionRuntimeError) {
+          return reply.code(502).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
 
   // FR1: create a project. The body is validated against the shared contract (400 on a bad
   // request); on success the persisted row — with its server-generated id, applied warehouse

@@ -3,6 +3,7 @@ import { openStore } from "./store/duckdb.js";
 import { createDatastackOpencode } from "./opencode/client.js";
 import { createRunBridge } from "./opencode/bridge.js";
 import { createApprovalGate } from "./opencode/approvals.js";
+import { SessionManager } from "./opencode/sessions.js";
 
 /** Boot entrypoint: start the OpenCode runtime, then bind the HTTP server. */
 const PORT = Number(process.env.PORT ?? 3001);
@@ -24,10 +25,14 @@ async function main(): Promise<void> {
     onEvent: (event) => approvals.ingest(event),
     onError: (error) => console.error("event bridge error:", error),
   });
+  // Orchestrate chat sessions over the runtime + store (FR1) so the session routes can
+  // create/list/get/rename/delete conversations.
+  const sessions = new SessionManager(runtime.client, store);
   const app = buildServer({
     opencode: runtime.client,
     approvals,
     store,
+    sessions,
   });
 
   // Stop the bridge pump, then the spawned opencode process, then close the store, when the

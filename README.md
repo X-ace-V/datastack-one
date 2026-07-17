@@ -77,13 +77,16 @@ the catalog or is honestly absent.
 
 ## HTTP API
 
-The surface the wizard's removal left standing. The session, chat, and event-stream routes the
-conversational shell needs are not built yet.
+The wizard-era surface plus the v2 session routes. The chat-turn and event-stream routes the
+conversational shell also needs are not built yet.
 
 | Route | Purpose |
 |-------|---------|
 | `GET /api/health` | Liveness. |
 | `GET /api/models` | Live provider/model catalog (FR13). |
+| `POST /api/sessions` · `GET /api/sessions` | Create / list chat sessions (FR1). |
+| `GET /api/sessions/:id` | A session with its message history (FR1). |
+| `PATCH /api/sessions/:id` · `DELETE /api/sessions/:id` | Rename / delete a session (FR1). |
 | `POST /api/projects` · `GET /api/projects` | Create / list projects. |
 | `POST /api/projects/:id/source` · `GET /api/projects/:id/sources` | Upload / list CSV sources (FR4). |
 | `POST /api/projects/:id/profile` | Profile a source (FR6). |
