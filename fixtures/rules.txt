@@ -1,0 +1,7 @@
+Remove duplicate customers by customer_id.
+Convert loan_amount to numeric.
+Create a loan_status column:
+- overdue if dpd_days > 0
+- active if dpd_days = 0 and balance > 0
+- closed if balance = 0
+Create daily branch-level summary with total active loans and overdue amount.
