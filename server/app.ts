@@ -5,8 +5,10 @@ import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
 import { ApprovalDecisionSchema } from "./core/approvals.js";
 import { CreateProjectRequestSchema } from "./core/projects.js";
 import {
+  ChatRequestSchema,
   CreateSessionRequestSchema,
   RenameSessionRequestSchema,
+  SessionModelError,
 } from "./core/sessions.js";
 import { ProfileRequestSchema } from "./core/profile.js";
 import { RulesInputSchema } from "./core/artifacts.js";
@@ -221,6 +223,66 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
           return reply.code(404).send({ error: "session not found" });
         }
         return reply.code(204).send();
+      } catch (err) {
+        if (err instanceof SessionRuntimeError) {
+          return reply.code(502).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // FR2: send a natural-language turn to a session. The user's prompt is validated (400) and
+  // persisted, then fired at the agent runtime; the route returns 202 immediately with the
+  // persisted user message while the assistant's reasoning/tool-calls/reply stream over SSE.
+  // The manager checks the store before touching the runtime, so an unknown id is a clean 404;
+  // a malformed model ref is a 400. Status map: 503 unwired, 400 bad body/model, 404 unknown,
+  // 202 accepted (the persisted user turn).
+  app.post<{ Params: { id: string } }>(
+    "/api/sessions/:id/chat",
+    async (req, reply) => {
+      if (!deps.sessions) {
+        return reply.code(503).send({ error: "session manager unavailable" });
+      }
+
+      const parsed = ChatRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid chat turn", details: parsed.error.issues });
+      }
+
+      try {
+        const message = await deps.sessions.chat(req.params.id, parsed.data);
+        if (!message) {
+          return reply.code(404).send({ error: "session not found" });
+        }
+        return reply.code(202).send(message);
+      } catch (err) {
+        if (err instanceof SessionModelError) {
+          return reply.code(400).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // FR2: cancel the in-flight turn on a session via `session.abort`. The manager checks the
+  // store before touching the runtime, so an unknown id is a clean 404; a runtime failure to
+  // abort is a 502. Status map: 503 unwired, 404 unknown, 502 runtime, 200 cancelled.
+  app.post<{ Params: { id: string } }>(
+    "/api/sessions/:id/cancel",
+    async (req, reply) => {
+      if (!deps.sessions) {
+        return reply.code(503).send({ error: "session manager unavailable" });
+      }
+
+      try {
+        const cancelled = await deps.sessions.cancel(req.params.id);
+        if (!cancelled) {
+          return reply.code(404).send({ error: "session not found" });
+        }
+        return reply.code(200).send({ status: "cancelled" });
       } catch (err) {
         if (err instanceof SessionRuntimeError) {
           return reply.code(502).send({ error: err.message });

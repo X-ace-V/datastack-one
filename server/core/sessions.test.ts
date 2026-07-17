@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  ChatRequestSchema,
   CreateSessionRequestSchema,
   MessageSchema,
+  parseModelRef,
   RenameSessionRequestSchema,
+  SessionModelError,
   SessionSchema,
 } from "./sessions.js";
 
@@ -49,6 +52,38 @@ describe("session contract", () => {
     });
     expect(ok.model).toBeNull();
     expect(SessionSchema.safeParse({ id: "ses_1" }).success).toBe(false);
+  });
+
+  it("requires non-empty chat text and trims it, keeping model optional", () => {
+    const parsed = ChatRequestSchema.parse({ text: "  profile this  " });
+    expect(parsed.text).toBe("profile this");
+    expect(parsed.model).toBeUndefined();
+    expect(ChatRequestSchema.safeParse({}).success).toBe(false);
+    expect(ChatRequestSchema.safeParse({ text: "   " }).success).toBe(false);
+  });
+
+  it("keeps an explicit chat model override, trimmed", () => {
+    expect(
+      ChatRequestSchema.parse({ text: "hi", model: "  opencode/big-pickle " }),
+    ).toEqual({ text: "hi", model: "opencode/big-pickle" });
+  });
+
+  it("splits a model ref on the first slash", () => {
+    expect(parseModelRef("opencode/big-pickle")).toEqual({
+      providerID: "opencode",
+      modelID: "big-pickle",
+    });
+    // A modelID may itself contain slashes; only the first split matters.
+    expect(parseModelRef("openrouter/meta/llama")).toEqual({
+      providerID: "openrouter",
+      modelID: "meta/llama",
+    });
+  });
+
+  it("throws SessionModelError on a ref missing either half", () => {
+    expect(() => parseModelRef("big-pickle")).toThrow(SessionModelError);
+    expect(() => parseModelRef("opencode/")).toThrow(SessionModelError);
+    expect(() => parseModelRef("/big-pickle")).toThrow(SessionModelError);
   });
 
   it("rejects an unknown message role and a negative sequence", () => {

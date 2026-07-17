@@ -3,6 +3,7 @@ import { buildServer } from "./app.js";
 import { openStore, type WarehouseStore } from "./store/duckdb.js";
 import { SessionManager, type SessionManagerClient } from "./opencode/sessions.js";
 import {
+  MessageSchema,
   SessionSchema,
   SessionWithHistorySchema,
 } from "./core/sessions.js";
@@ -21,6 +22,7 @@ describe("session routes", () => {
 
   afterEach(async () => {
     await Promise.all(open.splice(0).map((s) => s.close()));
+    prompt.mockClear();
   });
 
   /**
@@ -28,11 +30,16 @@ describe("session routes", () => {
    * `update`/`delete` succeed. Pass `createError`/`updateError`/`deleteError` to simulate a
    * runtime error envelope on that call, so a route's 502 path can be exercised.
    */
+  const prompt = vi.fn(() =>
+    Promise.resolve({ data: { info: {}, parts: [] }, error: undefined }),
+  );
+
   function mockClient(
     opts: {
       createError?: unknown;
       updateError?: unknown;
       deleteError?: unknown;
+      abortError?: unknown;
     } = {},
   ): SessionManagerClient {
     let counter = 0;
@@ -51,6 +58,12 @@ describe("session routes", () => {
         delete: vi.fn(async () =>
           opts.deleteError
             ? { data: undefined, error: opts.deleteError }
+            : { data: true, error: undefined },
+        ),
+        prompt,
+        abort: vi.fn(async () =>
+          opts.abortError
+            ? { data: undefined, error: opts.abortError }
             : { data: true, error: undefined },
         ),
       },
@@ -248,6 +261,138 @@ describe("session routes", () => {
     expect(after.statusCode).toBe(200);
   });
 
+  it("accepts a chat turn with 202, persists it, and fires the prompt", async () => {
+    const app = await appWith(mockClient());
+    const created = SessionSchema.parse(
+      (await app.inject({ method: "POST", url: "/api/sessions", payload: {} })).json(),
+    );
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${created.id}/chat`,
+      payload: { text: "which branch has the most overdue loans?" },
+    });
+    expect(res.statusCode).toBe(202);
+    const message = MessageSchema.parse(res.json());
+    expect([message.role, message.content, message.seq]).toEqual([
+      "user",
+      "which branch has the most overdue loans?",
+      0,
+    ]);
+    // The runtime was prompted with the turn text.
+    expect(prompt).toHaveBeenCalledWith({
+      path: { id: created.id },
+      body: {
+        parts: [
+          { type: "text", text: "which branch has the most overdue loans?" },
+        ],
+      },
+    });
+    // The user turn is now in the session's persisted history.
+    const withHistory = SessionWithHistorySchema.parse(
+      (await app.inject({ method: "GET", url: `/api/sessions/${created.id}` })).json(),
+    );
+    expect(withHistory.messages.map((m) => m.content)).toEqual([
+      "which branch has the most overdue loans?",
+    ]);
+  });
+
+  it("threads the session's model into the chat prompt", async () => {
+    const app = await appWith(mockClient());
+    const created = SessionSchema.parse(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/sessions",
+          payload: { model: "opencode/big-pickle" },
+        })
+      ).json(),
+    );
+
+    await app.inject({
+      method: "POST",
+      url: `/api/sessions/${created.id}/chat`,
+      payload: { text: "hi" },
+    });
+    expect(prompt).toHaveBeenCalledWith({
+      path: { id: created.id },
+      body: {
+        parts: [{ type: "text", text: "hi" }],
+        model: { providerID: "opencode", modelID: "big-pickle" },
+      },
+    });
+  });
+
+  it("rejects an empty chat turn with 400 and never prompts", async () => {
+    const app = await appWith(mockClient());
+    const created = SessionSchema.parse(
+      (await app.inject({ method: "POST", url: "/api/sessions", payload: {} })).json(),
+    );
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${created.id}/chat`,
+      payload: { text: "   " },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed model ref on a chat turn with 400", async () => {
+    const app = await appWith(mockClient());
+    const created = SessionSchema.parse(
+      (await app.inject({ method: "POST", url: "/api/sessions", payload: {} })).json(),
+    );
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${created.id}/chat`,
+      payload: { text: "hi", model: "no-slash" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 chatting to an unknown session", async () => {
+    const app = await appWith(mockClient());
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions/nope/chat",
+      payload: { text: "hi" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("cancels an in-flight turn with 200", async () => {
+    const app = await appWith(mockClient());
+    const created = SessionSchema.parse(
+      (await app.inject({ method: "POST", url: "/api/sessions", payload: {} })).json(),
+    );
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${created.id}/cancel`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ status: "cancelled" });
+  });
+
+  it("returns 404 cancelling an unknown session", async () => {
+    const app = await appWith(mockClient());
+    const res = await app.inject({ method: "POST", url: "/api/sessions/nope/cancel" });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("returns 502 when the runtime fails to cancel", async () => {
+    const app = await appWith(mockClient({ abortError: { message: "runtime down" } }));
+    const created = SessionSchema.parse(
+      (await app.inject({ method: "POST", url: "/api/sessions", payload: {} })).json(),
+    );
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${created.id}/cancel`,
+    });
+    expect(res.statusCode).toBe(502);
+  });
+
   it("reports 503 for every session route when the manager is unwired", async () => {
     const app = buildServer({});
     for (const call of [
@@ -256,6 +401,8 @@ describe("session routes", () => {
       { method: "GET" as const, url: "/api/sessions/x" },
       { method: "PATCH" as const, url: "/api/sessions/x", payload: { title: "y" } },
       { method: "DELETE" as const, url: "/api/sessions/x" },
+      { method: "POST" as const, url: "/api/sessions/x/chat", payload: { text: "hi" } },
+      { method: "POST" as const, url: "/api/sessions/x/cancel" },
     ]) {
       const res = await app.inject(call);
       expect(res.statusCode).toBe(503);

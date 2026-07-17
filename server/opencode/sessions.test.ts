@@ -5,6 +5,7 @@ import {
   SessionRuntimeError,
   type SessionManagerClient,
 } from "./sessions.js";
+import { SessionModelError } from "../core/sessions.js";
 import { getSession } from "../store/sessions.js";
 
 /**
@@ -33,12 +34,20 @@ describe("SessionManager", () => {
    * `createError` to simulate a runtime failure envelope on create.
    */
   function mockClient(
-    opts: { createError?: unknown } = {},
+    opts: {
+      createError?: unknown;
+      abortError?: unknown;
+      /** When set, `prompt` returns a promise that never resolves — models the long-running,
+       *  streamed turn, so a test can prove `chat` returns without awaiting it. */
+      promptNeverResolves?: boolean;
+    } = {},
   ): SessionManagerClient & {
     session: {
       create: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
       delete: ReturnType<typeof vi.fn>;
+      prompt: ReturnType<typeof vi.fn>;
+      abort: ReturnType<typeof vi.fn>;
     };
   } {
     let counter = 0;
@@ -56,6 +65,16 @@ describe("SessionManager", () => {
         }),
         update: vi.fn(async () => ({ data: {}, error: undefined })),
         delete: vi.fn(async () => ({ data: true, error: undefined })),
+        prompt: vi.fn(() =>
+          opts.promptNeverResolves
+            ? new Promise(() => {})
+            : Promise.resolve({ data: { info: {}, parts: [] }, error: undefined }),
+        ),
+        abort: vi.fn(async () =>
+          opts.abortError
+            ? { data: undefined, error: opts.abortError }
+            : { data: true, error: undefined },
+        ),
       },
     } as never;
   }
@@ -183,5 +202,125 @@ describe("SessionManager", () => {
 
     expect(await manager.delete("missing")).toBe(false);
     expect(client.session.delete).not.toHaveBeenCalled();
+  });
+
+  it("persists the user turn and fires session.prompt with the text", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ title: "Chat" });
+
+    const message = await manager.chat(created.id, { text: "profile this csv" });
+
+    // The returned + persisted message is the user's turn at seq 0.
+    expect(message).not.toBeNull();
+    expect([message!.role, message!.content, message!.seq]).toEqual([
+      "user",
+      "profile this csv",
+      0,
+    ]);
+    expect((await manager.get(created.id))?.messages.map((m) => m.content)).toEqual([
+      "profile this csv",
+    ]);
+    // The prompt was fired at the runtime with the text and no explicit model (session default).
+    expect(client.session.prompt).toHaveBeenCalledWith({
+      path: { id: created.id },
+      body: { parts: [{ type: "text", text: "profile this csv" }] },
+    });
+  });
+
+  it("returns without awaiting the streamed turn to completion", async () => {
+    const store = await freshStore();
+    // prompt never resolves — a real turn streams for many seconds; chat must not block on it.
+    const client = mockClient({ promptNeverResolves: true });
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ title: "Chat" });
+
+    const message = await manager.chat(created.id, { text: "hi" });
+    expect(message?.content).toBe("hi");
+    expect(client.session.prompt).toHaveBeenCalledOnce();
+  });
+
+  it("resolves the model as turn-override → session default", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({
+      title: "Chat",
+      model: "opencode/big-pickle",
+    });
+
+    // No override: the session's stored model applies, parsed into provider/model.
+    await manager.chat(created.id, { text: "one" });
+    expect(client.session.prompt).toHaveBeenLastCalledWith({
+      path: { id: created.id },
+      body: {
+        parts: [{ type: "text", text: "one" }],
+        model: { providerID: "opencode", modelID: "big-pickle" },
+      },
+    });
+
+    // A turn override wins over the session default.
+    await manager.chat(created.id, { text: "two", model: "anthropic/claude-sonnet-5" });
+    expect(client.session.prompt).toHaveBeenLastCalledWith({
+      path: { id: created.id },
+      body: {
+        parts: [{ type: "text", text: "two" }],
+        model: { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      },
+    });
+  });
+
+  it("returns null and never touches the runtime for an unknown session", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+
+    expect(await manager.chat("missing", { text: "hi" })).toBeNull();
+    expect(client.session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed model ref before persisting anything", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ title: "Chat" });
+
+    await expect(
+      manager.chat(created.id, { text: "hi", model: "no-slash" }),
+    ).rejects.toBeInstanceOf(SessionModelError);
+    // No dangling user turn was left behind, and the runtime was never prompted.
+    expect((await manager.get(created.id))?.messages).toEqual([]);
+    expect(client.session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("cancels an in-flight turn via session.abort", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ title: "Chat" });
+
+    expect(await manager.cancel(created.id)).toBe(true);
+    expect(client.session.abort).toHaveBeenCalledWith({ path: { id: created.id } });
+  });
+
+  it("does not touch the runtime when cancelling an unknown session", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+
+    expect(await manager.cancel("missing")).toBe(false);
+    expect(client.session.abort).not.toHaveBeenCalled();
+  });
+
+  it("raises a runtime error when abort fails", async () => {
+    const store = await freshStore();
+    const client = mockClient({ abortError: { message: "boom" } });
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ title: "Chat" });
+
+    await expect(manager.cancel(created.id)).rejects.toBeInstanceOf(
+      SessionRuntimeError,
+    );
   });
 });

@@ -1,8 +1,11 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { WarehouseStore } from "../store/duckdb.js";
 import {
+  ChatRequestSchema,
   CreateSessionRequestSchema,
   DEFAULT_SESSION_TITLE,
+  parseModelRef,
+  type ChatRequest,
   type CreateSessionRequest,
   type Message,
   type MessageRole,
@@ -154,5 +157,74 @@ export class SessionManager {
     content: string,
   ): Promise<Message> {
     return appendMessage(this.store, { sessionId, role, content });
+  }
+
+  /**
+   * Send a natural-language turn to a session (PRD FR2). Persists the user's prompt to the
+   * transcript, then fires `session.prompt` at the OpenCode runtime and returns immediately —
+   * the assistant's reasoning, tool calls, and reply stream back over SSE (the event bridge,
+   * V1.4/V1.5) rather than being awaited here, which is what lets the route answer `202` fast.
+   *
+   * Returns the persisted user {@link Message} (so the UI can render it at once with its
+   * assigned `seq`), or `null` if the session id is unknown (checked against the store first,
+   * so an unknown id never reaches the runtime). The model for the turn is resolved as
+   * turn-override → session default → platform default; a malformed override/stored ref throws
+   * {@link file://../core/sessions.ts}'s `SessionModelError` before anything is persisted.
+   */
+  async chat(sessionId: string, input: ChatRequest): Promise<Message | null> {
+    const parsed = ChatRequestSchema.parse(input);
+
+    const existing = await getSession(this.store, sessionId);
+    if (!existing) {
+      return null;
+    }
+
+    // Resolve + validate the model BEFORE persisting, so a bad ref is a clean failure that
+    // leaves no dangling user turn with no agent reply. Omitted → the runtime's default.
+    const ref = parsed.model ?? existing.model ?? undefined;
+    const model = ref ? parseModelRef(ref) : undefined;
+
+    const message = await appendMessage(this.store, {
+      sessionId,
+      role: "user",
+      content: parsed.text,
+    });
+
+    // Fire-and-forget: the turn runs in the background and its output streams over SSE. We do
+    // not await it (that is what keeps the route fast) and swallow a transport rejection here —
+    // a runtime failure surfaces to the client as a `session.error` event on the stream, not
+    // as this call's result. The SDK returns a `{ data, error }` envelope rather than throwing,
+    // so this catch only guards an unexpected transport-level reject from becoming unhandled.
+    void this.client.session
+      .prompt({
+        path: { id: sessionId },
+        body: {
+          parts: [{ type: "text", text: parsed.text }],
+          ...(model ? { model } : {}),
+        },
+      })
+      .catch(() => {});
+
+    return message;
+  }
+
+  /**
+   * Cancel the in-flight turn on a session (PRD FR2) via `session.abort`. Returns `true` if the
+   * session exists (checked against the store first, so an unknown id never hits the runtime),
+   * `false` otherwise — so a route can 404 cleanly. A runtime error envelope becomes a
+   * {@link SessionRuntimeError} (route → 502). Aborting an idle session is a harmless no-op.
+   */
+  async cancel(sessionId: string): Promise<boolean> {
+    const existing = await getSession(this.store, sessionId);
+    if (!existing) {
+      return false;
+    }
+
+    const res = await this.client.session.abort({ path: { id: sessionId } });
+    if (res.error) {
+      throw new SessionRuntimeError("abort", res.error);
+    }
+
+    return true;
   }
 }

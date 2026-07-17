@@ -42,6 +42,47 @@ export const RenameSessionRequestSchema = z.object({
 export type RenameSessionRequest = z.infer<typeof RenameSessionRequestSchema>;
 
 /**
+ * Request body for a chat turn (`POST /api/sessions/:id/chat`, FR2). `text` is the natural-
+ * language prompt (trimmed, non-empty — an empty turn is meaningless). `model` optionally
+ * overrides the model for this single turn; omitted, the session's stored model applies, and
+ * absent that, the platform default. The turn is fired at the agent and the answer streams
+ * back over SSE, so this body carries only what the user typed.
+ */
+export const ChatRequestSchema = z.object({
+  /** The user's natural-language prompt for this turn. */
+  text: z.string().trim().min(1),
+  /** Per-turn model ref (e.g. `opencode/big-pickle`); omitted → the session/platform default. */
+  model: z.string().trim().min(1).optional(),
+});
+export type ChatRequest = z.infer<typeof ChatRequestSchema>;
+
+/**
+ * Thrown when a per-session/per-turn model ref cannot be split into `provider/model`. A route
+ * maps this to `400 Bad Request`: the caller named a model in a shape the runtime can't use.
+ * Self-contained here (mirroring the per-stage parse errors) so the session layer owns its
+ * own failure type rather than importing a stage's.
+ */
+export class SessionModelError extends Error {
+  constructor(ref: string) {
+    super(`invalid model ref "${ref}" (expected provider/model)`);
+    this.name = "SessionModelError";
+  }
+}
+
+/**
+ * Split a `provider/model` ref (e.g. `opencode/big-pickle`) into the `{ providerID, modelID }`
+ * shape `session.prompt` expects. Splits on the first `/` so a model id containing slashes is
+ * preserved. Throws {@link SessionModelError} on a ref missing either half.
+ */
+export function parseModelRef(ref: string): { providerID: string; modelID: string } {
+  const slash = ref.indexOf("/");
+  if (slash <= 0 || slash === ref.length - 1) {
+    throw new SessionModelError(ref);
+  }
+  return { providerID: ref.slice(0, slash), modelID: ref.slice(slash + 1) };
+}
+
+/**
  * A persisted session as returned by the API. `model` is nullable (unset → platform
  * default). `createdAt`/`updatedAt` are DB timestamps rendered as strings; `updatedAt`
  * bumps on rename and on each appended message so the sidebar can order by recent activity.
