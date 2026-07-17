@@ -39,6 +39,13 @@ export function PlanPage() {
   const [dq, setDq] = useState<DqSpec | null>(null);
   const [generatingDq, setGeneratingDq] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  /**
+   * Token for the rules load currently in flight. A save/upload supersedes it: the artifact the
+   * user just wrote is newer than whatever the initial `GET /rules` returns, so once a write starts
+   * the pending read must not land — otherwise its (older, possibly null) result clobbers the
+   * artifact and the "Rules saved" confirmation vanishes.
+   */
+  const rulesLoad = useRef({ active: false });
 
   // Load projects on mount and default the selection to the newest one.
   useEffect(() => {
@@ -66,18 +73,21 @@ export function PlanPage() {
     setTransform(null);
     setDq(null);
     if (!projectId) return;
-    let active = true;
+    // Tracked on a ref as well as in the closure so a save/upload can supersede this read the
+    // moment it starts, not only when the project changes or the page unmounts.
+    const load = { active: true };
+    rulesLoad.current = load;
     getRules(projectId)
       .then((rules) => {
-        if (!active) return;
+        if (!load.active) return;
         setCurrent(rules);
         if (rules?.content) setRulesText(rules.content);
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : String(err));
+        if (load.active) setError(err instanceof Error ? err.message : String(err));
       });
     return () => {
-      active = false;
+      load.active = false;
     };
   }, [projectId]);
 
@@ -86,6 +96,8 @@ export function PlanPage() {
       setError("Select a project first.");
       return;
     }
+    // This write is newer than any rules read still in flight; drop that read's result.
+    rulesLoad.current.active = false;
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -105,6 +117,8 @@ export function PlanPage() {
       setError("Select a project first.");
       return;
     }
+    // This write is newer than any rules read still in flight; drop that read's result.
+    rulesLoad.current.active = false;
     setSaving(true);
     setError(null);
     setSaved(false);

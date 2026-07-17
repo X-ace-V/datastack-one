@@ -181,6 +181,44 @@ describe("plan rules page", () => {
     expect(status.textContent).toContain("Rules saved");
   });
 
+  it("keeps an uploaded artifact when the initial rules load resolves after the upload", async () => {
+    // Regression: both requests are in flight at once, and whichever resolves last used to win.
+    // A late `GET /rules` would `setCurrent(null)` over the just-uploaded artifact, silently
+    // wiping the "Rules saved" confirmation. The upload is newer, so it must survive.
+    let releaseGetRules: () => void = () => {};
+    const getRulesGate = new Promise<void>((resolve) => {
+      releaseGetRules = resolve;
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if ((init?.method ?? "GET").toUpperCase() === "POST") {
+          return jsonResponse(201, makeArtifact({ content: "rules from file" }));
+        }
+        if (url.endsWith("/rules")) {
+          await getRulesGate;
+          return jsonResponse(200, { rules: null });
+        }
+        return jsonResponse(200, { projects: [makeProject()] });
+      }),
+    );
+    renderPage();
+
+    const input = (await screen.findByLabelText(/rules file/i)) as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(["rules from file"], "loan_rules.txt", { type: "text/plain" })] },
+    });
+    expect((await screen.findByRole("status")).textContent).toContain("Rules saved");
+
+    // The stale initial load lands only now — it must not clobber the uploaded artifact.
+    releaseGetRules();
+    await waitFor(() =>
+      expect(screen.queryByRole("status")?.textContent).toContain("Rules saved"),
+    );
+  });
+
   it("generates a plan and renders its pattern, warehouse and steps", async () => {
     const postCalls: PostCall[] = [];
     const plan = {
