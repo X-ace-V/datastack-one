@@ -150,3 +150,91 @@ export const NormalizedEventSchema = z.discriminatedUnion("kind", [
   ErrorEventSchema,
 ]);
 export type NormalizedEvent = z.infer<typeof NormalizedEventSchema>;
+
+/**
+ * A normalized event tagged with the monotonic sequence number the {@link ReplayBuffer}
+ * assigned it. The `seq` is what a client echoes back (as `?lastSeq` / `Last-Event-ID`) to
+ * resume after a dropped connection, and what the SSE route writes as each frame's `id:`.
+ */
+export interface SequencedEvent {
+  /** Strictly-increasing, 1-based position in the global event stream. */
+  seq: number;
+  event: NormalizedEvent;
+}
+
+/**
+ * How many recent events the replay buffer retains for reconnect. A turn's stream is short
+ * (a few dozen deltas + tool cards), so this comfortably covers a reconnect that spans one
+ * or two turns while bounding memory — an event older than the window simply cannot be
+ * replayed (the client re-syncs from the persisted history instead, V6.2).
+ */
+export const DEFAULT_REPLAY_BUFFER_SIZE = 512;
+
+/**
+ * A bounded, monotonic-sequence replay buffer over the normalized event stream (FR3). Every
+ * appended event gets the next `seq`; the buffer keeps only the most recent `capacity`
+ * events. On reconnect a client asks for everything after the last `seq` it saw — optionally
+ * scoped to one session — so it catches up without the server re-reading the runtime. Pure
+ * (no fs/net/process): the SSE route ({@link file://../app.ts}) owns the sockets, this owns
+ * the sequencing + retention so both are unit-testable in isolation. Mirrors Crux `sse.ts`.
+ */
+export class ReplayBuffer {
+  private readonly events: SequencedEvent[] = [];
+  private seq = 0;
+
+  constructor(private readonly capacity: number = DEFAULT_REPLAY_BUFFER_SIZE) {}
+
+  /** Append an event, assigning it the next sequence number, and evict the oldest if full. */
+  append(event: NormalizedEvent): SequencedEvent {
+    this.seq += 1;
+    const sequenced: SequencedEvent = { seq: this.seq, event };
+    this.events.push(sequenced);
+    if (this.events.length > this.capacity) this.events.shift();
+    return sequenced;
+  }
+
+  /**
+   * Retained events with `seq` strictly greater than `afterSeq`, in order, optionally scoped
+   * to one session. An `afterSeq` older than the retained window yields only what survives in
+   * the buffer — a dropped event is gone, never resurrected.
+   */
+  replay(afterSeq: number, sessionId?: string): SequencedEvent[] {
+    return this.events.filter(
+      (e) =>
+        e.seq > afterSeq &&
+        (sessionId === undefined || e.event.sessionID === sessionId),
+    );
+  }
+
+  /** The highest sequence number assigned so far (0 before any append). */
+  get lastSeq(): number {
+    return this.seq;
+  }
+}
+
+/**
+ * Query contract for `GET /api/events` (FR3). `sessionId` scopes the stream to one session
+ * (per-session routing); `lastSeq` requests replay of everything after that sequence number
+ * (reconnect). Both are optional — no `sessionId` streams every session, no `lastSeq` starts
+ * live from now. `lastSeq` is coerced from its string query form and must be a non-negative
+ * integer, so a malformed cursor is a 400 rather than a silently-ignored value.
+ */
+export const EventsQuerySchema = z.object({
+  sessionId: z.string().min(1).optional(),
+  lastSeq: z.coerce.number().int().nonnegative().optional(),
+});
+export type EventsQuery = z.infer<typeof EventsQuerySchema>;
+
+/**
+ * Parse an SSE `Last-Event-ID` header into a resume cursor. A browser `EventSource`
+ * automatically replays this header on reconnect, so it is honored as a fallback when the
+ * client did not pass an explicit `?lastSeq`. A missing or malformed value yields `undefined`
+ * (start live) rather than throwing.
+ */
+export function parseLastEventId(value: string | undefined): number | undefined {
+  // An absent or blank header carries no cursor — Number("") / Number(" ") both coerce to 0,
+  // which would wrongly replay the whole buffer, so guard those before coercing.
+  if (value === undefined || value.trim() === "") return undefined;
+  const seq = Number(value);
+  return Number.isInteger(seq) && seq >= 0 ? seq : undefined;
+}

@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  EventsQuerySchema,
   formatSseFrame,
   NormalizedEventSchema,
   NORMALIZED_EVENT_KINDS,
   NORMALIZED_TOOL_STATUSES,
+  parseLastEventId,
+  ReplayBuffer,
   type NormalizedEvent,
 } from "./events.js";
+
+/** A minimal idle event for the given session — the smallest routable normalized event. */
+function idle(sessionID: string): NormalizedEvent {
+  return { kind: "idle", sessionID };
+}
 
 /**
  * Unit tests for the pure SSE framing (T1.3). These assert the exact wire bytes an
@@ -129,5 +137,94 @@ describe("NormalizedEventSchema", () => {
     expect(
       NormalizedEventSchema.safeParse({ kind: "status", sessionID: "s" }).success,
     ).toBe(false);
+  });
+});
+
+/**
+ * The monotonic-sequence replay buffer backing `GET /api/events` reconnect (V1.5, FR3). These
+ * assert the sequencing, the per-session scoping of replay, and the bounded retention — the
+ * exact invariants the SSE route's no-gap/no-duplicate resume rests on.
+ */
+describe("ReplayBuffer", () => {
+  it("assigns strictly increasing seqs starting at 1", () => {
+    const buffer = new ReplayBuffer();
+    expect(buffer.lastSeq).toBe(0);
+    expect(buffer.append(idle("s1"))).toEqual({ seq: 1, event: idle("s1") });
+    expect(buffer.append(idle("s2"))).toEqual({ seq: 2, event: idle("s2") });
+    expect(buffer.lastSeq).toBe(2);
+  });
+
+  it("replays only events after the given seq, in order", () => {
+    const buffer = new ReplayBuffer();
+    buffer.append(idle("s1")); // seq 1
+    buffer.append(idle("s1")); // seq 2
+    buffer.append(idle("s1")); // seq 3
+    expect(buffer.replay(0).map((e) => e.seq)).toEqual([1, 2, 3]);
+    expect(buffer.replay(1).map((e) => e.seq)).toEqual([2, 3]);
+    expect(buffer.replay(3)).toEqual([]);
+  });
+
+  it("scopes replay to one session when a sessionId is given", () => {
+    const buffer = new ReplayBuffer();
+    buffer.append(idle("s1")); // seq 1
+    buffer.append(idle("s2")); // seq 2
+    buffer.append(idle("s1")); // seq 3
+    expect(buffer.replay(0, "s1").map((e) => e.seq)).toEqual([1, 3]);
+    expect(buffer.replay(0, "s2").map((e) => e.seq)).toEqual([2]);
+    // Cross the session filter with the seq cursor: only s1 events after seq 1.
+    expect(buffer.replay(1, "s1").map((e) => e.seq)).toEqual([3]);
+  });
+
+  it("retains only the most recent `capacity` events, dropping the oldest", () => {
+    const buffer = new ReplayBuffer(3);
+    for (let i = 0; i < 5; i += 1) buffer.append(idle("s1")); // seqs 1..5
+    // seqs 1 and 2 are evicted; seq keeps counting past the window.
+    expect(buffer.lastSeq).toBe(5);
+    expect(buffer.replay(0).map((e) => e.seq)).toEqual([3, 4, 5]);
+  });
+
+  it("cannot resurrect an event older than the retained window", () => {
+    const buffer = new ReplayBuffer(2);
+    for (let i = 0; i < 4; i += 1) buffer.append(idle("s1")); // seqs 1..4, retains 3,4
+    // A client that last saw seq 1 asks for >1, but 2 is gone — it gets only what survives.
+    expect(buffer.replay(1).map((e) => e.seq)).toEqual([3, 4]);
+  });
+});
+
+describe("EventsQuerySchema", () => {
+  it("coerces lastSeq from its string query form and keeps sessionId", () => {
+    expect(EventsQuerySchema.parse({ sessionId: "ses_1", lastSeq: "42" })).toEqual({
+      sessionId: "ses_1",
+      lastSeq: 42,
+    });
+  });
+
+  it("accepts an empty query (both fields optional)", () => {
+    expect(EventsQuerySchema.parse({})).toEqual({});
+  });
+
+  it("rejects a negative or non-integer lastSeq", () => {
+    expect(EventsQuerySchema.safeParse({ lastSeq: "-1" }).success).toBe(false);
+    expect(EventsQuerySchema.safeParse({ lastSeq: "3.5" }).success).toBe(false);
+    expect(EventsQuerySchema.safeParse({ lastSeq: "abc" }).success).toBe(false);
+  });
+
+  it("rejects an empty sessionId", () => {
+    expect(EventsQuerySchema.safeParse({ sessionId: "" }).success).toBe(false);
+  });
+});
+
+describe("parseLastEventId", () => {
+  it("parses a non-negative integer header into a resume cursor", () => {
+    expect(parseLastEventId("0")).toBe(0);
+    expect(parseLastEventId("7")).toBe(7);
+  });
+
+  it("returns undefined for a missing or malformed header", () => {
+    expect(parseLastEventId(undefined)).toBeUndefined();
+    expect(parseLastEventId("-1")).toBeUndefined();
+    expect(parseLastEventId("1.5")).toBeUndefined();
+    expect(parseLastEventId("abc")).toBeUndefined();
+    expect(parseLastEventId("")).toBeUndefined();
   });
 });

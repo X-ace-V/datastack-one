@@ -88,6 +88,7 @@ conversational shell also needs are not built yet.
 | `GET /api/sessions/:id` | A session with its message history (FR1). |
 | `PATCH /api/sessions/:id` · `DELETE /api/sessions/:id` | Rename / delete a session (FR1). |
 | `POST /api/sessions/:id/chat` · `POST /api/sessions/:id/cancel` | Send an NL turn / cancel the in-flight turn (FR2). |
+| `GET /api/events` | SSE chat stream: per-session routing + `?lastSeq` replay (FR3). |
 | `POST /api/projects` · `GET /api/projects` | Create / list projects. |
 | `POST /api/projects/:id/source` · `GET /api/projects/:id/sources` | Upload / list CSV sources (FR4). |
 | `POST /api/projects/:id/profile` | Profile a source (FR6). |

@@ -13,6 +13,11 @@ import {
 import { ProfileRequestSchema } from "./core/profile.js";
 import { RulesInputSchema } from "./core/artifacts.js";
 import { isCsvFilename } from "./core/sources.js";
+import {
+  EventsQuerySchema,
+  formatSseFrame,
+  parseLastEventId,
+} from "./core/events.js";
 import { listModels, type ModelsClient } from "./opencode/models.js";
 import type { WarehouseStore } from "./store/duckdb.js";
 import { getProject, insertProject, listProjects } from "./store/projects.js";
@@ -38,6 +43,7 @@ import {
   UnknownApprovalError,
   type ApprovalGate,
 } from "./opencode/approvals.js";
+import type { EventHub } from "./opencode/hub.js";
 import { SessionManager, SessionRuntimeError } from "./opencode/sessions.js";
 
 /** Backend identity, surfaced by `/api/health` so a client can confirm the target. */
@@ -68,6 +74,11 @@ export interface ServerDeps {
    * and the session routes report 503.
    */
   sessions?: SessionManager;
+  /**
+   * Event hub fanning normalized runtime events to the `GET /api/events` SSE stream (FR3).
+   * Absent → the events route reports 503, since a health-only boot has no runtime stream.
+   */
+  events?: EventHub;
   /**
    * Directory uploaded CSVs are written to (FR2). Defaults to {@link DEFAULT_UPLOADS_DIR};
    * tests override it with a tmp dir so they never touch the repo's `data/`.
@@ -291,6 +302,54 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       }
     },
   );
+
+  // FR3: the chat event stream. One long-lived SSE connection relays the normalized runtime
+  // events (assistant text/reasoning deltas, tool cards with status, turn idle/error) that the
+  // event hub sequences. `?sessionId` scopes the stream to one session (per-session routing);
+  // `?lastSeq` (or the SSE `Last-Event-ID` header on an automatic reconnect) replays the backlog
+  // after that sequence number before the live stream resumes, so a dropped connection catches
+  // up without gap or duplicate. Each frame's `id:` is the seq a client echoes back to resume.
+  // The response is hijacked (Fastify's reply lifecycle can't model an endless stream) and the
+  // subscription is dropped when the client disconnects. Status map: 503 unwired, 400 bad query,
+  // 200 the stream.
+  app.get<{ Querystring: unknown }>("/api/events", (req, reply) => {
+    if (!deps.events) {
+      return reply.code(503).send({ error: "event stream unavailable" });
+    }
+
+    const parsed = EventsQuerySchema.safeParse(req.query ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid events query", details: parsed.error.issues });
+    }
+
+    const header = req.headers["last-event-id"];
+    const lastSeq =
+      parsed.data.lastSeq ??
+      parseLastEventId(typeof header === "string" ? header : undefined);
+
+    // Take over the socket: write SSE headers, prime the stream with a comment so proxies
+    // flush, then push each sequenced event as it arrives.
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+    raw.write(": connected\n\n");
+
+    const unsubscribe = deps.events.subscribe(
+      ({ seq, event }) => {
+        raw.write(formatSseFrame({ id: String(seq), event: event.kind, data: event }));
+      },
+      { sessionId: parsed.data.sessionId, lastSeq },
+    );
+
+    req.raw.on("close", unsubscribe);
+    return reply;
+  });
 
   // FR1: create a project. The body is validated against the shared contract (400 on a bad
   // request); on success the persisted row — with its server-generated id, applied warehouse

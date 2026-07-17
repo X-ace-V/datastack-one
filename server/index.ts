@@ -2,6 +2,7 @@ import { buildServer } from "./app.js";
 import { openStore } from "./store/duckdb.js";
 import { createDatastackOpencode } from "./opencode/client.js";
 import { createEventBridge } from "./opencode/bridge.js";
+import { createEventHub } from "./opencode/hub.js";
 import { createApprovalGate } from "./opencode/approvals.js";
 import { SessionManager } from "./opencode/sessions.js";
 
@@ -21,12 +22,13 @@ async function main(): Promise<void> {
   const approvals = createApprovalGate(runtime.client);
   // Pump the runtime's event stream once: raw events feed the permission gate, while the
   // bridge fans normalized chat events (text/reasoning/tool/idle/error) to its subscribers.
-  // The per-session SSE fan-out to `GET /api/events` that the chat UI subscribes to is wired
-  // in V1.5; for now nothing subscribes and the normalized stream is a live seam.
   const bridge = createEventBridge(runtime.client, {
     onRawEvent: (event) => approvals.ingest(event),
     onError: (error) => console.error("event bridge error:", error),
   });
+  // Sequence the normalized stream into a per-session, replayable SSE fan-out (FR3) that the
+  // chat UI subscribes to over `GET /api/events`.
+  const events = createEventHub(bridge);
   // Orchestrate chat sessions over the runtime + store (FR1) so the session routes can
   // create/list/get/rename/delete conversations.
   const sessions = new SessionManager(runtime.client, store);
@@ -35,12 +37,14 @@ async function main(): Promise<void> {
     approvals,
     store,
     sessions,
+    events,
   });
 
   // Stop the bridge pump, then the spawned opencode process, then close the store, when the
   // HTTP server closes, so a shutdown doesn't leave an orphaned subprocess, a dangling
   // subscription, or an open warehouse handle.
   app.addHook("onClose", async () => {
+    events.close();
     await bridge.close();
     runtime.close();
     await store.close();
