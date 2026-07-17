@@ -1,12 +1,13 @@
 import { z } from "zod";
 
 /**
- * Pure SSE (Server-Sent Events) framing + the run-progress payload contract. The OpenCode
- * bridge ({@link file://../opencode/bridge.ts}) reads the runtime's event stream, filters
- * it to the events for a given run's session, and serializes each with
- * {@link formatSseFrame} for `GET /api/runs/:runId/events` (PRD FR9). Keeping the wire
- * format here — pure, no fs/net/process — lets the framing be unit-tested directly and
- * reused by any future SSE endpoint. See ARCHITECTURE §6.
+ * Pure SSE (Server-Sent Events) framing + the normalized chat-event contract. The OpenCode
+ * event bridge ({@link file://../opencode/bridge.ts}) reads the runtime's raw event stream,
+ * maps each event to a {@link NormalizedEvent} (or drops it), and the SSE route
+ * (`GET /api/events`, V1.5) frames each with {@link formatSseFrame} and routes it to the
+ * right session's subscribers. Keeping the wire format + the event shape here — pure, no
+ * fs/net/process — lets both be unit-tested directly and reused by any SSE endpoint. See
+ * ARCHITECTURE §6, PRD FR2/FR3.
  */
 
 /** One Server-Sent Event to serialize onto the wire. */
@@ -35,18 +36,117 @@ export function formatSseFrame(frame: SseFrame): string {
 }
 
 /**
- * The payload delivered as an SSE frame's `data` for a run-progress event: the run it
- * belongs to plus the OpenCode event `type` and its `properties`, forwarded verbatim so
- * the UI can render the agent's reasoning, tool calls, and per-stage status (FR9). The
- * `properties` shape varies by event type, so it is carried opaquely and rendered by the
- * client, not re-validated here.
+ * The normalized event kinds surfaced to the chat UI (PRD FR2/FR3): streamed assistant
+ * `text`, agent `reasoning`, a `tool` call with its status, the turn going `idle`, and a
+ * turn `error`. Every other raw OpenCode event (message envelopes, session status, file
+ * watchers, permission events — handled by the approval bridge) maps to `null` and is not
+ * relayed to the chat stream.
  */
-export const RunProgressPayloadSchema = z.object({
-  /** The run this progress belongs to (the `:runId` path param of the SSE route). */
-  runId: z.string().min(1),
-  /** The OpenCode event type, e.g. `message.part.updated` / `session.status`. */
-  type: z.string().min(1),
-  /** The event's properties, forwarded verbatim for the UI to render. */
-  properties: z.unknown(),
+export const NORMALIZED_EVENT_KINDS = [
+  "text",
+  "reasoning",
+  "tool",
+  "idle",
+  "error",
+] as const;
+export type NormalizedEventKind = (typeof NORMALIZED_EVENT_KINDS)[number];
+
+/**
+ * OpenCode's native tool-call statuses (the `ToolState.status` values). Distinct from the
+ * deterministic runner's lineage statuses in {@link file://./lineage.ts} — these track a
+ * live agent-invoked tool call as it streams: queued → executing → done/failed.
+ */
+export const NORMALIZED_TOOL_STATUSES = [
+  "pending",
+  "running",
+  "completed",
+  "error",
+] as const;
+export type NormalizedToolStatus = (typeof NORMALIZED_TOOL_STATUSES)[number];
+
+/** Fields every normalized event carries so the SSE route can route it per session. */
+const baseFields = {
+  /** The OpenCode session this event belongs to — the SSE routing key (FR3). */
+  sessionID: z.string().min(1),
+};
+
+/** A streamed chunk of assistant message text (accumulates by `partID`). */
+export const TextEventSchema = z.object({
+  ...baseFields,
+  kind: z.literal("text"),
+  /** The assistant message this text belongs to. */
+  messageID: z.string().min(1),
+  /** The message part id — the stable key the UI updates in place as text streams. */
+  partID: z.string().min(1),
+  /** The part's current text (the full accumulated text of this part, not just the delta). */
+  text: z.string(),
 });
-export type RunProgressPayload = z.infer<typeof RunProgressPayloadSchema>;
+export type TextEvent = z.infer<typeof TextEventSchema>;
+
+/** A streamed chunk of the agent's reasoning (rendered separately from the answer). */
+export const ReasoningEventSchema = z.object({
+  ...baseFields,
+  kind: z.literal("reasoning"),
+  messageID: z.string().min(1),
+  partID: z.string().min(1),
+  text: z.string(),
+});
+export type ReasoningEvent = z.infer<typeof ReasoningEventSchema>;
+
+/**
+ * A tool call and its current status, rendered as a tool card. Carries the model-produced
+ * `input` (its arguments), and — once terminal — the `output` (completed) or `error`.
+ * Note (FR5b): a source is referenced by **name**, never a URL, so nothing secret ever
+ * reaches this `input` and thus never the SSE stream.
+ */
+export const ToolEventSchema = z.object({
+  ...baseFields,
+  kind: z.literal("tool"),
+  messageID: z.string().min(1),
+  partID: z.string().min(1),
+  /** The tool-call id — stable across the pending→running→terminal status updates. */
+  callID: z.string().min(1),
+  /** The tool being called, e.g. `profile_source` / `run_query`. */
+  tool: z.string().min(1),
+  /** Where the call is in its lifecycle. */
+  status: z.enum(NORMALIZED_TOOL_STATUSES),
+  /** The model-produced arguments (present in every ToolState). */
+  input: z.record(z.string(), z.unknown()).optional(),
+  /** The tool's result, once it has completed. */
+  output: z.string().optional(),
+  /** The failure detail, if the call errored. */
+  error: z.string().optional(),
+  /** A short human-readable title the runtime attaches while running/after completion. */
+  title: z.string().optional(),
+});
+export type ToolEvent = z.infer<typeof ToolEventSchema>;
+
+/** The turn finished — the agent is idle and awaiting the next prompt. */
+export const IdleEventSchema = z.object({
+  ...baseFields,
+  kind: z.literal("idle"),
+});
+export type IdleEvent = z.infer<typeof IdleEventSchema>;
+
+/** The turn failed — surfaced in the chat instead of a silent stall (FR2). */
+export const ErrorEventSchema = z.object({
+  ...baseFields,
+  kind: z.literal("error"),
+  /** A human-readable failure message extracted from the runtime error. */
+  message: z.string(),
+});
+export type ErrorEvent = z.infer<typeof ErrorEventSchema>;
+
+/**
+ * The normalized chat event delivered over `GET /api/events` (FR3). A discriminated union
+ * on `kind` so the browser store can switch on it exhaustively, and every member carries a
+ * `sessionID` so the SSE route can fan it out to the right session's subscribers.
+ */
+export const NormalizedEventSchema = z.discriminatedUnion("kind", [
+  TextEventSchema,
+  ReasoningEventSchema,
+  ToolEventSchema,
+  IdleEventSchema,
+  ErrorEventSchema,
+]);
+export type NormalizedEvent = z.infer<typeof NormalizedEventSchema>;

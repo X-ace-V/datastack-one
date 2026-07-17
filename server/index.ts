@@ -1,7 +1,7 @@
 import { buildServer } from "./app.js";
 import { openStore } from "./store/duckdb.js";
 import { createDatastackOpencode } from "./opencode/client.js";
-import { createRunBridge } from "./opencode/bridge.js";
+import { createEventBridge } from "./opencode/bridge.js";
 import { createApprovalGate } from "./opencode/approvals.js";
 import { SessionManager } from "./opencode/sessions.js";
 
@@ -19,10 +19,12 @@ async function main(): Promise<void> {
   // Capture permission requests into the approval gate (FR10). It is fed from the event
   // bridge's single pump below, so the runtime's event stream is read exactly once.
   const approvals = createApprovalGate(runtime.client);
-  // Pump the runtime's event stream so permission requests reach the gate. The per-session
-  // fan-out to `GET /api/events` that the chat UI subscribes to is wired in V1.5.
-  const bridge = createRunBridge(runtime.client, {
-    onEvent: (event) => approvals.ingest(event),
+  // Pump the runtime's event stream once: raw events feed the permission gate, while the
+  // bridge fans normalized chat events (text/reasoning/tool/idle/error) to its subscribers.
+  // The per-session SSE fan-out to `GET /api/events` that the chat UI subscribes to is wired
+  // in V1.5; for now nothing subscribes and the normalized stream is a live seam.
+  const bridge = createEventBridge(runtime.client, {
+    onRawEvent: (event) => approvals.ingest(event),
     onError: (error) => console.error("event bridge error:", error),
   });
   // Orchestrate chat sessions over the runtime + store (FR1) so the session routes can

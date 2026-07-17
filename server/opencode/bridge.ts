@@ -1,121 +1,159 @@
-import type { Event, OpencodeClient } from "@opencode-ai/sdk";
-import { formatSseFrame, type RunProgressPayload, type SseFrame } from "../core/events.js";
+import type { Event, OpencodeClient, Part } from "@opencode-ai/sdk";
+import type { NormalizedEvent } from "../core/events.js";
 
 /**
- * OpenCode → SSE progress bridge (TASKS T1.3, PRD FR9). Subscribes once to the runtime's
- * global event stream and fans each event out to the SSE subscribers of the run whose
- * session produced it. A run is bound to an OpenCode session by the pipeline runner
- * (T4.4) via {@link RunBridge.bindSession}; until a run is bound it has no progress. This
- * is the one place the platform reads `event.subscribe()`. See ARCHITECTURE §6.
+ * OpenCode → normalized chat-event bridge (TASKS V1.4, PRD FR2/FR3). Subscribes **once** to
+ * the runtime's global event stream, maps each raw event to a {@link NormalizedEvent} (text
+ * delta / reasoning / tool-call w/ status / idle / error) via {@link normalizeEvent}, and
+ * fans the normalized events out to its subscribers. It also exposes every raw event via
+ * `onRawEvent` so the permission gate (V1.6) can read `permission.updated` off the same
+ * single pump — the platform reads `event.subscribe()` exactly once. The per-session
+ * routing + replay buffer over these normalized events is the SSE route (V1.5). See
+ * ARCHITECTURE §6.
  */
-
-/** OpenCode event types surfaced to the UI as run progress (FR9). */
-export const PROGRESS_EVENT_TYPES: ReadonlySet<string> = new Set([
-  // The assistant message envelope: role, model, timing.
-  "message.updated",
-  // Streamed message parts: agent reasoning text and tool calls (the main signal).
-  "message.part.updated",
-  // Coarse busy/retry/idle status for the session.
-  "session.status",
-  // The session finished its turn — a stage completed.
-  "session.idle",
-  // The session's turn failed — a stage errored.
-  "session.error",
-]);
-
-/** Whether an event type is relayed to a run's progress stream. */
-export function isProgressEvent(type: string): boolean {
-  return PROGRESS_EVENT_TYPES.has(type);
-}
-
-/**
- * Extract the OpenCode session id an event belongs to, or `undefined` if the event is not
- * session-scoped. The id lives in different places by event shape: most carry it directly
- * under `properties.sessionID`, `message.updated` nests it under `properties.info`, and
- * `message.part.updated` nests it under `properties.part`.
- */
-export function sessionIdOf(event: Event): string | undefined {
-  const props = event.properties as Record<string, unknown> | undefined;
-  if (!props) return undefined;
-  if (typeof props.sessionID === "string") return props.sessionID;
-  const info = props.info as { sessionID?: unknown } | undefined;
-  if (info && typeof info.sessionID === "string") return info.sessionID;
-  const part = props.part as { sessionID?: unknown } | undefined;
-  if (part && typeof part.sessionID === "string") return part.sessionID;
-  return undefined;
-}
-
-/** Receives a fully-formatted SSE frame string, ready to write to the response socket. */
-export type FrameSink = (frame: string) => void;
-
-/** Public bridge surface consumed by the SSE route and (later) the pipeline runner. */
-export interface RunBridge {
-  /** Associate a run with the OpenCode session whose events feed its progress stream. */
-  bindSession(runId: string, sessionID: string): void;
-  /**
-   * Subscribe a client to a run's SSE frames. Returns an unsubscribe function that the
-   * route calls when the browser disconnects, so dead sockets are dropped.
-   */
-  subscribe(runId: string, sink: FrameSink): () => void;
-  /**
-   * Push an application-produced frame to a run's subscribers (the scripted runner's per-stage
-   * status + approval events, T4.4). Unlike the OpenCode event fan-out, this is originated by
-   * the platform, not the agent runtime; it is a no-op when the run has no live subscribers.
-   */
-  publish(runId: string, frame: SseFrame): void;
-  /** Stop the event pump and drop all subscribers. Idempotent. */
-  close(): Promise<void>;
-}
 
 /** Minimal client slice the bridge needs: the `event.subscribe()` stream. */
 export type EventClient = Pick<OpencodeClient, "event">;
 
-export interface RunBridgeOptions {
+/**
+ * The runtime error union carried by a `session.error` event's `properties.error`. Each
+ * member is `{ name, data }`; only some `data` shapes carry a `message`.
+ */
+interface RuntimeError {
+  name?: string;
+  data?: { message?: unknown };
+}
+
+/** Extract a human-readable message from a `session.error` payload, with sane fallbacks. */
+function errorMessage(error: RuntimeError | undefined): string {
+  if (!error) return "session error";
+  const message = error.data?.message;
+  if (typeof message === "string" && message.length > 0) return message;
+  if (typeof error.name === "string" && error.name.length > 0) return error.name;
+  return "session error";
+}
+
+/** Map a streamed message `Part` to a normalized event, or `null` if it is not chat content. */
+function normalizePart(part: Part): NormalizedEvent | null {
+  switch (part.type) {
+    case "text": {
+      // Synthetic parts are runtime-injected (not genuine streamed output) — skip them.
+      if (part.synthetic) return null;
+      return {
+        kind: "text",
+        sessionID: part.sessionID,
+        messageID: part.messageID,
+        partID: part.id,
+        text: part.text,
+      };
+    }
+    case "reasoning":
+      return {
+        kind: "reasoning",
+        sessionID: part.sessionID,
+        messageID: part.messageID,
+        partID: part.id,
+        text: part.text,
+      };
+    case "tool": {
+      const state = part.state;
+      return {
+        kind: "tool",
+        sessionID: part.sessionID,
+        messageID: part.messageID,
+        partID: part.id,
+        callID: part.callID,
+        tool: part.tool,
+        status: state.status,
+        input: state.input,
+        output: state.status === "completed" ? state.output : undefined,
+        error: state.status === "error" ? state.error : undefined,
+        title:
+          state.status === "running" || state.status === "completed"
+            ? state.title
+            : undefined,
+      };
+    }
+    // file / step-start / step-finish / snapshot / agent / patch parts are not chat content.
+    default:
+      return null;
+  }
+}
+
+/**
+ * Map one raw OpenCode event to the normalized chat event the UI renders, or `null` when
+ * the event is not part of the chat stream (message envelopes, session status, file
+ * watchers, permission events — those go to the approval gate, not here). Pure and total:
+ * this is the mapping V1.4 unit-tests. A `session.error` with no session id can't be routed
+ * per session, so it is dropped rather than emitted unattributed.
+ */
+export function normalizeEvent(event: Event): NormalizedEvent | null {
+  switch (event.type) {
+    case "message.part.updated":
+      return normalizePart(event.properties.part);
+    case "session.idle":
+      return { kind: "idle", sessionID: event.properties.sessionID };
+    case "session.error": {
+      const sessionID = event.properties.sessionID;
+      if (!sessionID) return null;
+      return {
+        kind: "error",
+        sessionID,
+        message: errorMessage(event.properties.error as RuntimeError | undefined),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/** Receives one normalized event as it arrives from the runtime. */
+export type NormalizedListener = (event: NormalizedEvent) => void;
+
+/** The event bridge surface consumed by the SSE route (V1.5) and the boot wiring. */
+export interface EventBridge {
   /**
-   * Observer for every raw event read from the runtime, before progress filtering. The
-   * lineage recorder (FR12) and boot smoke tests hook here to see the live stream.
+   * Subscribe to the normalized event stream. The listener fires for every event across all
+   * sessions (the SSE route filters per session, V1.5). Returns an unsubscribe function.
    */
-  onEvent?: (event: Event) => void;
+  subscribe(listener: NormalizedListener): () => void;
+  /** Stop the event pump and drop all subscribers. Idempotent. */
+  close(): Promise<void>;
+}
+
+export interface EventBridgeOptions {
   /**
-   * Called if the event stream terminates with an error while the bridge is still open,
-   * so a dropped subscription surfaces instead of silently ending progress.
+   * Observer for every raw event read from the runtime, before normalization. The permission
+   * gate (FR8/FR10) hooks here to see `permission.updated`/`permission.replied`, and boot
+   * smoke tests hook here to observe the live stream — so `event.subscribe()` is read once.
+   */
+  onRawEvent?: (event: Event) => void;
+  /**
+   * Called if the event stream terminates with an error while the bridge is still open, so a
+   * dropped subscription surfaces instead of silently ending the stream.
    */
   onError?: (error: unknown) => void;
 }
 
 /**
- * Create the run bridge and immediately start pumping the runtime's event stream. The
- * pump runs until {@link RunBridge.close} aborts it; the SDK's SSE client reconnects on
- * transient network errors on its own, so only a terminal failure reaches `onError`.
+ * Create the event bridge and immediately start pumping the runtime's event stream. The pump
+ * runs until {@link EventBridge.close} aborts it; the SDK's SSE client reconnects on transient
+ * network errors on its own, so only a terminal failure reaches `onError`.
  */
-export function createRunBridge(
+export function createEventBridge(
   client: EventClient,
-  options: RunBridgeOptions = {},
-): RunBridge {
-  // sessionID → runId. One session backs one run in the MVP's scripted pipeline.
-  const runBySession = new Map<string, string>();
-  // runId → its set of connected SSE sinks (a run may have multiple viewers).
-  const sinksByRun = new Map<string, Set<FrameSink>>();
+  options: EventBridgeOptions = {},
+): EventBridge {
+  const listeners = new Set<NormalizedListener>();
   const abort = new AbortController();
   let closed = false;
 
-  /** Route one raw event to the sinks of the run it belongs to, if any. */
+  /** Feed the raw event to observers, then fan its normalized form to subscribers. */
   function dispatch(event: Event): void {
-    options.onEvent?.(event);
-    if (!isProgressEvent(event.type)) return;
-    const sessionID = sessionIdOf(event);
-    if (!sessionID) return;
-    const runId = runBySession.get(sessionID);
-    if (!runId) return;
-    const sinks = sinksByRun.get(runId);
-    if (!sinks || sinks.size === 0) return;
-    const payload: RunProgressPayload = {
-      runId,
-      type: event.type,
-      properties: event.properties,
-    };
-    const frame = formatSseFrame({ event: event.type, data: payload });
-    for (const sink of sinks) sink(frame);
+    options.onRawEvent?.(event);
+    const normalized = normalizeEvent(event);
+    if (!normalized) return;
+    for (const listener of listeners) listener(normalized);
   }
 
   async function pump(): Promise<void> {
@@ -126,43 +164,25 @@ export function createRunBridge(
     }
   }
 
-  // Fire-and-forget: the pump lives for the bridge's lifetime. Swallow the abort error
-  // raised by close(); surface any other terminal failure via onError.
+  // Fire-and-forget: the pump lives for the bridge's lifetime. Swallow the abort error raised
+  // by close(); surface any other terminal failure via onError.
   void pump().catch((error) => {
     if (closed) return;
     options.onError?.(error);
   });
 
   return {
-    bindSession(runId, sessionID) {
-      runBySession.set(sessionID, runId);
-    },
-    subscribe(runId, sink) {
-      let sinks = sinksByRun.get(runId);
-      if (!sinks) {
-        sinks = new Set();
-        sinksByRun.set(runId, sinks);
-      }
-      sinks.add(sink);
+    subscribe(listener) {
+      listeners.add(listener);
       return () => {
-        const set = sinksByRun.get(runId);
-        if (!set) return;
-        set.delete(sink);
-        if (set.size === 0) sinksByRun.delete(runId);
+        listeners.delete(listener);
       };
-    },
-    publish(runId, frame) {
-      const sinks = sinksByRun.get(runId);
-      if (!sinks || sinks.size === 0) return;
-      const wire = formatSseFrame(frame);
-      for (const sink of sinks) sink(wire);
     },
     async close() {
       if (closed) return;
       closed = true;
       abort.abort();
-      runBySession.clear();
-      sinksByRun.clear();
+      listeners.clear();
     },
   };
 }
