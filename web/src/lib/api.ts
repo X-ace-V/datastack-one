@@ -132,6 +132,93 @@ export async function listModels(): Promise<ModelCatalog> {
   return (await res.json()) as ModelCatalog;
 }
 
+/**
+ * A persisted chat session, mirroring the backend `SessionSchema` (FR1). `model` is the
+ * per-session default (null → the platform default). `updatedAt` bumps on rename and on each
+ * appended message, so the sidebar orders sessions by recent activity.
+ */
+export interface Session {
+  id: string;
+  title: string;
+  model: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One persisted transcript message, mirroring the backend `MessageSchema` (FR1). */
+export interface Message {
+  id: string;
+  sessionId: string;
+  seq: number;
+  role: "user" | "assistant" | "system";
+  content: string;
+  createdAt: string;
+}
+
+/** A session together with its ordered history, mirroring `SessionWithHistorySchema` (FR1). */
+export interface SessionWithHistory extends Session {
+  messages: Message[];
+}
+
+/** Fields accepted by `POST /api/sessions`; both optional (an untitled create is allowed). */
+export interface CreateSessionInput {
+  title?: string;
+  model?: string;
+}
+
+/** List all chat sessions, most recently active first, for the sidebar (V2.3). */
+export async function listSessions(): Promise<Session[]> {
+  const res = await fetch("/api/sessions");
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load sessions"));
+  }
+  const body = (await res.json()) as { sessions: Session[] };
+  return body.sessions;
+}
+
+/** Create a chat session and return the persisted row (201). */
+export async function createSession(input: CreateSessionInput = {}): Promise<Session> {
+  const res = await fetch("/api/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to create session"));
+  }
+  return (await res.json()) as Session;
+}
+
+/** Fetch a session together with its ordered message history (FR1) — the shape a reopen needs. */
+export async function getSession(id: string): Promise<SessionWithHistory> {
+  const res = await fetch(`/api/sessions/${id}`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load session"));
+  }
+  return (await res.json()) as SessionWithHistory;
+}
+
+/** Rename a session (title required) and return the updated row (FR1). */
+export async function renameSession(id: string, title: string): Promise<Session> {
+  const res = await fetch(`/api/sessions/${id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to rename session"));
+  }
+  return (await res.json()) as Session;
+}
+
+/** Delete a session and its entire message history (FR1). Resolves on the 204 No Content. */
+export async function deleteSession(id: string): Promise<void> {
+  const res = await fetch(`/api/sessions/${id}`, { method: "DELETE" });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to delete session"));
+  }
+}
+
 /** List all projects, newest first. */
 export async function listProjects(): Promise<Project[]> {
   const res = await fetch("/api/projects");
