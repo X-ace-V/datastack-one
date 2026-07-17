@@ -39,6 +39,7 @@ export const PLATFORM_TABLES = [
   "sources",
   "runs",
   "run_steps",
+  "run_tool_calls",
   "artifacts",
   "dq_results",
   "approvals",
@@ -96,6 +97,23 @@ const MIGRATION_STATEMENTS: readonly string[] = [
      status      VARCHAR NOT NULL DEFAULT 'pending',
      detail      VARCHAR,
      started_at  TIMESTAMP,
+     finished_at TIMESTAMP
+   );`,
+
+  // FR12 — the tool calls a run executed, one row per tool the runner invoked. `run_steps` records
+  // the six visible stages; this records what actually ran inside them (tool, args, outcome), which
+  // is a strict subset: a stage with no tool (Extract) contributes none. `status` starts 'running'
+  // and is written before the tool executes, so a call that dies mid-flight still leaves a trace.
+  `CREATE TABLE IF NOT EXISTS platform.run_tool_calls (
+     id          VARCHAR PRIMARY KEY,
+     run_id      VARCHAR NOT NULL,
+     step_id     VARCHAR NOT NULL,
+     tool        VARCHAR NOT NULL,
+     args        VARCHAR,
+     status      VARCHAR NOT NULL DEFAULT 'running',
+     result      VARCHAR,
+     error       VARCHAR,
+     started_at  TIMESTAMP NOT NULL DEFAULT now(),
      finished_at TIMESTAMP
    );`,
 

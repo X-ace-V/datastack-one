@@ -24,6 +24,11 @@ import {
   startRunStep,
   updateRunStatus,
 } from "../store/runs.js";
+import {
+  completeToolCall,
+  recordDqResults,
+  startToolCall,
+} from "../store/lineage.js";
 
 /**
  * The scripted pipeline runner (TASKS T4.4/T5.1/T5.2, PRD FR7/FR8/FR9/FR10, ARCHITECTURE §3.3, §4).
@@ -33,8 +38,11 @@ import {
  * (land/load/transform/publish) the runner parks on {@link RunPipelineDeps.approve} and does not
  * execute until a human approves, so nothing writes or executes unapproved (FR8). A reject aborts
  * the run; a data-quality failure in the DQ stage also aborts it, so Publish never runs on bad data
- * (FR7). An I/O module (DuckDB via the tools + the run store), so it lives under `server/pipeline`;
- * the schemas and stage list are the pure {@link file://../core/run.ts}.
+ * (FR7). Alongside the step status it records the run's lineage (T5.5, FR12): every tool call it
+ * executes and every DQ check outcome, so a finished run can be audited after the fact — see
+ * {@link file://../store/lineage.ts}. An I/O module (DuckDB via the tools + the run store), so it
+ * lives under `server/pipeline`; the schemas and stage list are the pure
+ * {@link file://../core/run.ts} and {@link file://../core/lineage.ts}.
  */
 
 /** Everything the runner needs to execute one run to completion. */
@@ -118,6 +126,40 @@ export async function runPipeline(deps: RunPipelineDeps): Promise<RunState> {
     }
   }
 
+  /**
+   * Execute one tool and record the call to the run's lineage (FR12). The record opens `running`
+   * before the tool runs — so a call that dies mid-flight still leaves a trace — and closes with
+   * the outcome `describe` derives, or with the error message when the tool throws. Returns both
+   * the tool's value and that sentence, so a stage reports the same outcome it recorded rather than
+   * re-deriving a look-alike string.
+   */
+  async function toolCall<T>(
+    step: RunStep,
+    tool: string,
+    args: Record<string, unknown>,
+    execute: () => Promise<T>,
+    describe: (value: T) => string,
+  ): Promise<{ value: T; detail: string }> {
+    const record = await startToolCall(store, {
+      id: randomUUID(),
+      runId,
+      stepId: step.id,
+      tool,
+      args,
+    });
+    let value: T;
+    try {
+      value = await execute();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await completeToolCall(store, record.id, "failed", { error: message });
+      throw err;
+    }
+    const detail = describe(value);
+    await completeToolCall(store, record.id, "success", { result: detail });
+    return { value, detail };
+  }
+
   /** Park a gated stage on the approval gate; throw {@link StageRejectedError} if denied. */
   async function gate(
     step: RunStep,
@@ -159,57 +201,102 @@ export async function runPipeline(deps: RunPipelineDeps): Promise<RunState> {
       return `read ${n} rows from ${basename(deps.source.path)}`;
     });
 
-    // Land — gated: write the raw CSV to landing as partitioned Parquet.
+    // Land — gated: write the raw CSV to landing as partitioned Parquet. The args a human approves
+    // are the args the tool call records and runs, so the lineage shows exactly what was consented to.
     await stage("land", async () => {
       const step = stepByName.get("land")!;
-      await gate(step, "land_parquet", `Land ${dataset} as ingestion-date-partitioned Parquet`, null, {
+      const args = {
         sourcePath: deps.source.path,
         dataset,
         ingestionDate: deps.ingestionDate ?? null,
-      });
-      const res = await landParquet(store, {
-        landingDir: deps.landingDir,
-        sourcePath: deps.source.path,
-        dataset,
-        ingestionDate: deps.ingestionDate,
-      });
+      };
+      await gate(step, "land_parquet", `Land ${dataset} as ingestion-date-partitioned Parquet`, null, args);
+      const { value: res, detail } = await toolCall(
+        step,
+        "land_parquet",
+        args,
+        () =>
+          landParquet(store, {
+            landingDir: deps.landingDir,
+            sourcePath: deps.source.path,
+            dataset,
+            ingestionDate: deps.ingestionDate,
+          }),
+        (r) => `landed ${r.rowCount} rows → ${r.partitionPath}`,
+      );
       landingPath = res.landingPath;
-      return `landed ${res.rowCount} rows → ${res.partitionPath}`;
+      return detail;
     });
 
     // Load — gated: materialize the landed Parquet into raw.source.
     await stage("load", async () => {
       const step = stepByName.get("load")!;
       if (!landingPath) throw new Error("no landed Parquet to load");
-      await gate(step, "load_warehouse", `Load landed Parquet into raw.source`, null, {
-        landingPath,
-      });
-      const res = await loadWarehouse(store, { landingPath });
-      return `loaded ${res.rowCount} rows → ${res.qualifiedTable}`;
+      const args = { landingPath };
+      await gate(step, "load_warehouse", `Load landed Parquet into raw.source`, null, args);
+      const { detail } = await toolCall(
+        step,
+        "load_warehouse",
+        args,
+        () => loadWarehouse(store, { landingPath: args.landingPath }),
+        (r) => `loaded ${r.rowCount} rows → ${r.qualifiedTable}`,
+      );
+      return detail;
     });
 
     // Transform — gated: execute the reviewed SQL into marts. The exact SQL is shown for approval.
     await stage("transform", async () => {
       const step = stepByName.get("transform")!;
+      const args = { targetTable: deps.transform.targetTable, sql: deps.transform.sql };
       await gate(step, "run_transform", `Execute the reviewed transform SQL into marts`, deps.transform.sql, {
         targetTable: deps.transform.targetTable,
       });
-      const res = await runTransform(store, {
-        sql: deps.transform.sql,
-        targetTable: deps.transform.targetTable,
-      });
-      return `materialized ${res.rowCount} rows → ${res.qualifiedTable}`;
+      const { detail } = await toolCall(
+        step,
+        "run_transform",
+        args,
+        () =>
+          runTransform(store, {
+            sql: deps.transform.sql,
+            targetTable: deps.transform.targetTable,
+          }),
+        (r) => `materialized ${r.rowCount} rows → ${r.qualifiedTable}`,
+      );
+      return detail;
     });
 
     // DQ — read-only, not gated: run the reviewed checks. Any failure throws, failing the run so
-    // a later Publish stage never executes (FR7: DQ failure blocks publish).
+    // a later Publish stage never executes (FR7: DQ failure blocks publish). Note the tool call
+    // itself SUCCEEDS on a failing check — `run_dq_check` reports pass/fail rather than throwing —
+    // so the record shows a successful call whose outcome then failed the stage.
     await stage("dq", async () => {
-      const result = await runDqCheck(store, { spec: deps.dqSpec });
+      const step = stepByName.get("dq")!;
+      const { value: result, detail } = await toolCall(
+        step,
+        "run_dq_check",
+        { targetTable: deps.dqSpec.targetTable, checks: deps.dqSpec.checks.length },
+        () => runDqCheck(store, { spec: deps.dqSpec }),
+        (r) => {
+          const failedCount = r.results.filter((c) => !c.passed).length;
+          return failedCount === 0
+            ? `${r.results.length} DQ checks passed against ${r.targetTable}`
+            : `${failedCount} of ${r.results.length} DQ checks failed against ${r.targetTable}`;
+        },
+      );
+
+      // Record every check outcome — passing and failing — BEFORE a failure aborts the run (FR12).
+      // The record of which check blocked publish is exactly what makes the FR7 block auditable.
+      await recordDqResults(
+        store,
+        runId,
+        result.results.map((r) => ({ ...r, id: randomUUID() })),
+      );
+
       const failed = result.results.filter((r) => !r.passed);
       if (!result.passed) {
         throw new DqChecksFailedError(failed.map((r) => r.name));
       }
-      return `${result.results.length} DQ checks passed against ${result.targetTable}`;
+      return detail;
     });
 
     // Publish — gated: export the marts table to CSV and register its REST endpoint (FR10).
@@ -222,20 +309,33 @@ export async function runPipeline(deps: RunPipelineDeps): Promise<RunState> {
         runId,
         table: deps.transform.targetTable,
       });
+      const args = {
+        table: plan.table,
+        name: plan.name,
+        format: plan.format,
+        csvPath: plan.csvPath,
+      };
       await gate(
         step,
         "publish_serving",
         `Publish ${plan.qualifiedTable} at ${plan.endpoint} and export it to CSV`,
         plan.sql,
-        { table: plan.table, name: plan.name, format: plan.format, csvPath: plan.csvPath },
+        args,
       );
-      const served = await publishServing(store, {
-        servingDir: deps.servingDir,
-        projectId: deps.source.projectId,
-        runId,
-        table: deps.transform.targetTable,
-      });
-      return `published ${served.rowCount} rows → ${served.endpoint} (CSV ${served.csvPath})`;
+      const { detail } = await toolCall(
+        step,
+        "publish_serving",
+        args,
+        () =>
+          publishServing(store, {
+            servingDir: deps.servingDir,
+            projectId: deps.source.projectId,
+            runId,
+            table: deps.transform.targetTable,
+          }),
+        (s) => `published ${s.rowCount} rows → ${s.endpoint} (CSV ${s.csvPath})`,
+      );
+      return detail;
     });
 
     await updateRunStatus(store, runId, "success");

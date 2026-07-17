@@ -129,6 +129,22 @@ export async function getRun(
   return row ? rowToRun(row) : null;
 }
 
+/**
+ * List a project's runs, newest first — the run history a client pages through to open one run's
+ * lineage (FR12). Ordered by `created_at` with `id` as a stable tiebreak so two runs created within
+ * the same timestamp still read back in a fixed order.
+ */
+export async function listRuns(
+  store: WarehouseStore,
+  projectId: string,
+): Promise<Run[]> {
+  const rows = await store.all(
+    `SELECT ${RUN_COLUMNS} FROM platform.runs WHERE project_id = $1 ORDER BY created_at DESC, id`,
+    [projectId],
+  );
+  return rows.map(rowToRun);
+}
+
 /** List a run's steps in pipeline order. */
 export async function listRunSteps(
   store: WarehouseStore,

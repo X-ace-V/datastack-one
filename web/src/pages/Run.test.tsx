@@ -117,6 +117,8 @@ function jsonResponse(status: number, body: unknown): Response {
 interface FetchOpts {
   projects?: Project[];
   runResponse?: () => Response;
+  /** The project's run history served by `GET /api/projects/:id/runs` (FR12). */
+  runs?: Run[];
 }
 
 function installFetch(opts: FetchOpts = {}) {
@@ -130,6 +132,11 @@ function installFetch(opts: FetchOpts = {}) {
     }
     if (url.endsWith("/run")) {
       return (opts.runResponse ?? (() => jsonResponse(202, { run: RUN, steps: STEPS })))();
+    }
+    // The project's run history (`/api/projects/:id/runs`) — checked before the run-state route
+    // below, whose `/api/runs/` prefix this URL does not carry.
+    if (url.endsWith("/runs")) {
+      return jsonResponse(200, { runs: opts.runs ?? [] });
     }
     if (url.includes("/api/runs/")) {
       return jsonResponse(200, { run: RUN, steps: STEPS, approvals: [] });
@@ -310,6 +317,34 @@ describe("run page", () => {
     ]);
     expect(screen.getByText(/run aborted/i)).toBeTruthy();
     expect(screen.queryByRole("link", { name: /continue to serve/i })).toBeNull();
+  });
+
+  it("links a started run to its lineage and lists the project's run history", async () => {
+    const earlier: Run = {
+      ...RUN,
+      id: "run-0",
+      status: "failed",
+      createdAt: "2026-07-16 09:00:00",
+    };
+    installFetch({ runs: [earlier] });
+    renderPage();
+
+    // The history lists past runs before any new run is started, each linking to its lineage (FR12).
+    const history = await screen.findByRole("region", { name: /run history/i });
+    await waitFor(() => expect(history.textContent).toContain("failed"));
+    const historyLink = screen.getByRole("link", { name: "run-0" }) as HTMLAnchorElement;
+    expect(historyLink.getAttribute("href")).toBe("/runs/run-0");
+
+    // Starting a run reveals a lineage link for that run specifically.
+    const start = await screen.findByRole("button", { name: /start run/i });
+    await act(async () => {
+      fireEvent.click(start);
+    });
+
+    const lineageLink = (await screen.findByRole("link", {
+      name: /view run lineage/i,
+    })) as HTMLAnchorElement;
+    expect(lineageLink.getAttribute("href")).toBe("/runs/run-1");
   });
 
   it("surfaces a start error", async () => {

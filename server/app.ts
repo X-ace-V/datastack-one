@@ -49,8 +49,10 @@ import {
   createRun,
   getRunState,
   insertRunStep,
+  listRuns,
   recordApproval,
 } from "./store/runs.js";
+import { getRunLineage } from "./store/lineage.js";
 import {
   UnknownRunApprovalError,
   type RunApprovalGate,
@@ -852,6 +854,36 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     }
     const approvals = deps.runApprovals?.pending(req.params.runId) ?? [];
     return reply.code(200).send({ ...state, approvals });
+  });
+
+  // FR12 (T5.5): a run's complete lineage — the run, its ordered steps, every tool call it
+  // executed, every approval a human decided, and every DQ check outcome. This is the after-the-fact
+  // audit record the run detail view renders, distinct from `GET /api/runs/:runId` above, which
+  // serves a *live* run's state plus the approvals still awaiting an answer. 503 unwired store,
+  // 404 unknown run, 200 with the lineage.
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId/lineage", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "run store unavailable" });
+    }
+    const lineage = await getRunLineage(deps.store, req.params.runId);
+    if (!lineage) {
+      return reply.code(404).send({ error: "run not found" });
+    }
+    return reply.code(200).send(lineage);
+  });
+
+  // FR12 (T5.5): list a project's runs, newest first — the run history a client browses to open one
+  // run's lineage. A project that has never run returns an empty list: a normal pre-run state, not
+  // a 404. 503 unwired store, 404 unknown project, 200 with the runs.
+  app.get<{ Params: { id: string } }>("/api/projects/:id/runs", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "run store unavailable" });
+    }
+    const project = await getProject(deps.store, req.params.id);
+    if (!project) {
+      return reply.code(404).send({ error: "project not found" });
+    }
+    return reply.code(200).send({ runs: await listRuns(deps.store, project.id) });
   });
 
   // FR8 (T4.4): answer a pipeline run's gated stage. The runner parked the stage on the run

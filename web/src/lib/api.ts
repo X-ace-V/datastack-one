@@ -476,6 +476,93 @@ export async function resolveRunApproval(
   }
 }
 
+/** A recorded tool call's lifecycle, mirroring the backend `TOOL_CALL_STATUSES`. */
+export type ToolCallStatus = "running" | "success" | "failed";
+
+/**
+ * One recorded tool invocation, mirroring the backend `RunToolCallSchema` (FR12). `args` is `null`
+ * when nothing usable was recorded, which the detail view must show as "not recorded" rather than
+ * as an empty arg map.
+ */
+export interface RunToolCall {
+  id: string;
+  runId: string;
+  stepId: string;
+  tool: string;
+  args: Record<string, unknown> | null;
+  status: ToolCallStatus;
+  result: string | null;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+/**
+ * One recorded approval decision, mirroring the backend `RunApprovalRecordSchema` (FR8/FR12) — the
+ * audit trail proving every executed write tool was approved by a human first.
+ */
+export interface RunApprovalRecord {
+  id: string;
+  runId: string;
+  requestId: string;
+  tool: string;
+  args: Record<string, unknown> | null;
+  action: ApprovalAction;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+/**
+ * One recorded DQ check outcome, mirroring the backend `RunDqResultSchema` (FR7/FR12). A `passed:
+ * false` row here is what blocked the run's publish stage.
+ */
+export interface RunDqResult {
+  id: string;
+  runId: string;
+  checkName: string;
+  passed: boolean;
+  detail: string | null;
+  createdAt: string;
+}
+
+/**
+ * A run's complete lineage (FR12), mirroring the backend `RunLineageSchema`: the run, its steps,
+ * every tool call, every approval decision, and every DQ result. Each list is independently empty —
+ * a run rejected at its first gate has steps and one approval but no tool calls and no DQ results.
+ */
+export interface RunLineage {
+  run: Run;
+  steps: RunStep[];
+  toolCalls: RunToolCall[];
+  approvals: RunApprovalRecord[];
+  dqResults: RunDqResult[];
+}
+
+/**
+ * Fetch one run's complete lineage (FR12) for the run detail view. Distinct from
+ * {@link getRunState}, which serves a *live* run's state plus the approvals still awaiting an
+ * answer; this is the after-the-fact audit record of what actually happened.
+ */
+export async function getRunLineage(runId: string): Promise<RunLineage> {
+  const res = await fetch(`/api/runs/${runId}/lineage`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load run lineage"));
+  }
+  return (await res.json()) as RunLineage;
+}
+
+/**
+ * List a project's runs, newest first (FR12) — the history the run detail view is opened from. A
+ * project that has never run returns an empty list rather than an error.
+ */
+export async function listRuns(projectId: string): Promise<Run[]> {
+  const res = await fetch(`/api/projects/${projectId}/runs`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load runs"));
+  }
+  return ((await res.json()) as { runs: Run[] }).runs;
+}
+
 /**
  * A published table in the served registry (FR10), mirroring the backend `ServedTableSchema`.
  * `name` is the identity — it is the URL segment the generated endpoints are reached at — and

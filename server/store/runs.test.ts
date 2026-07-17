@@ -7,6 +7,7 @@ import {
   getRunState,
   insertRunStep,
   listRunSteps,
+  listRuns,
   recordApproval,
   startRunStep,
   updateRunStatus,
@@ -46,6 +47,27 @@ describe("run store", () => {
     const store = await fresh();
     const run = await createRun(store, { id: "r1", projectId: "p1", model: "anthropic/opus" });
     expect(run.model).toBe("anthropic/opus");
+  });
+
+  it("lists a project's runs newest first and scopes them to that project", async () => {
+    const store = await fresh();
+    await store.run(
+      `INSERT INTO platform.projects (id, name, domain) VALUES ('p2', 'Other', 'lending')`,
+    );
+    // Stamp explicit creation times so "newest first" is asserted against known values rather
+    // than the resolution of two back-to-back now() calls.
+    await createRun(store, { id: "r1", projectId: "p1" });
+    await createRun(store, { id: "r2", projectId: "p1" });
+    await createRun(store, { id: "r3", projectId: "p2" });
+    await store.run(`UPDATE platform.runs SET created_at = TIMESTAMP '2026-07-16 09:00:00' WHERE id = 'r1'`);
+    await store.run(`UPDATE platform.runs SET created_at = TIMESTAMP '2026-07-17 09:00:00' WHERE id = 'r2'`);
+
+    const runs = await listRuns(store, "p1");
+    expect(runs.map((r) => r.id)).toEqual(["r2", "r1"]);
+    // Another project's runs never appear in this project's history.
+    expect((await listRuns(store, "p2")).map((r) => r.id)).toEqual(["r3"]);
+    // A project that has never run is an empty history, not an error.
+    expect(await listRuns(store, "missing")).toEqual([]);
   });
 
   it("inserts pending steps and lists them in pipeline order", async () => {

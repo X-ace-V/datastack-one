@@ -6,6 +6,7 @@ import { ApprovalModal } from "../components/ApprovalModal";
 import {
   getRunState,
   listProjects,
+  listRuns,
   resolveRunApproval,
   startRun,
   subscribeRunEvents,
@@ -37,6 +38,7 @@ export function RunPage() {
   const [pending, setPending] = useState<RunApprovalRequest | null>(null);
   const [starting, setStarting] = useState(false);
   const [deciding, setDeciding] = useState(false);
+  const [history, setHistory] = useState<Run[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   // Load projects on mount and default the selection to the newest one.
@@ -55,6 +57,24 @@ export function RunPage() {
       active = false;
     };
   }, []);
+
+  // Load the selected project's run history (FR12) so past runs are reachable from here. Refetched
+  // when a run starts and again as its status changes, so a run that just finished is listed with
+  // the status it actually ended on rather than the one it had when the page loaded.
+  useEffect(() => {
+    if (!projectId) return;
+    let active = true;
+    listRuns(projectId)
+      .then((list) => {
+        if (active) setHistory(list);
+      })
+      .catch(() => {
+        // A failed history load is non-fatal: it never blocks starting or driving a run.
+      });
+    return () => {
+      active = false;
+    };
+  }, [projectId, run, status]);
 
   // Apply one streamed run event to local state. Stable (functional updates only) so the SSE
   // subscription effect never needs to resubscribe when component state changes.
@@ -232,6 +252,41 @@ export function RunPage() {
             {status === "failed" && (
               <p className="mt-4 text-sm text-red-600">Run failed — see the failed stage above.</p>
             )}
+
+            <p className="mt-4">
+              <Link
+                to={`/runs/${run.id}`}
+                className="text-sm font-medium text-indigo-600 hover:underline"
+              >
+                View run lineage →
+              </Link>
+            </p>
+          </section>
+        )}
+
+        {history.length > 0 && (
+          <section
+            role="region"
+            aria-label="Run history"
+            className="border-t border-slate-200 pt-4"
+          >
+            <h3 className="text-sm font-medium text-slate-700">Run history</h3>
+            <ul role="list" className="mt-2 space-y-1">
+              {history.map((entry) => (
+                <li key={entry.id} className="flex items-center gap-2 text-xs">
+                  <Link
+                    to={`/runs/${entry.id}`}
+                    className="font-mono text-indigo-600 hover:underline"
+                  >
+                    {entry.id.slice(0, 8)}
+                  </Link>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 font-medium text-slate-600">
+                    {entry.status}
+                  </span>
+                  <span className="text-slate-400">{entry.createdAt}</span>
+                </li>
+              ))}
+            </ul>
           </section>
         )}
       </div>

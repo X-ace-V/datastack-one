@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openStore, type WarehouseStore } from "../store/duckdb.js";
 import { createRun, getRunState, insertRunStep } from "../store/runs.js";
+import { getRunLineage } from "../store/lineage.js";
 import { getServedTable } from "../store/serving.js";
 import { PIPELINE_STAGES, type RunApprovalRequest, type RunEvent, type RunStep } from "../core/run.js";
 import type { Source } from "../core/sources.js";
@@ -327,6 +328,175 @@ describe("pipeline runner (Extract → Land → Load → Transform → DQ → Pu
     await expect(
       readFile(join(servingDir, "p1", "branch_balance_totals.csv"), "utf8"),
     ).rejects.toThrow();
+  });
+
+  it("records the lineage of a successful run: every tool call and every DQ result", async () => {
+    const { store, runId, steps, source, landingDir, servingDir } = await scaffold();
+    await runPipeline({
+      store,
+      runId,
+      steps,
+      source,
+      transform: TRANSFORM,
+      dqSpec: PASSING_DQ,
+      landingDir,
+      servingDir,
+      ingestionDate: "2026-07-17",
+      approve: async () => "approve",
+    });
+
+    const lineage = await getRunLineage(store, runId);
+
+    // FR12: one record per tool the runner executed, in execution order. Extract runs no tool, so
+    // the five here are a strict record of tool execution rather than a copy of the six steps.
+    expect(lineage!.toolCalls.map((c) => c.tool)).toEqual([
+      "land_parquet",
+      "load_warehouse",
+      "run_transform",
+      "run_dq_check",
+      "publish_serving",
+    ]);
+    expect(lineage!.toolCalls.every((c) => c.status === "success")).toBe(true);
+    expect(lineage!.toolCalls.every((c) => c.finishedAt !== null && c.error === null)).toBe(true);
+
+    // Each call records what actually came back, not a generic "ok".
+    const byTool = new Map(lineage!.toolCalls.map((c) => [c.tool, c]));
+    expect(byTool.get("land_parquet")!.result).toMatch(/landed 3 rows/);
+    expect(byTool.get("load_warehouse")!.result).toMatch(/loaded 3 rows → raw\.source/);
+    expect(byTool.get("run_transform")!.result).toMatch(
+      /materialized 2 rows → marts\.branch_balance_totals/,
+    );
+    expect(byTool.get("publish_serving")!.result).toMatch(/published 2 rows/);
+
+    // Every tool call is attributed to the stage it ran under, so lineage ties to the visible steps.
+    const stepIds = new Set(steps.map((s) => s.id));
+    expect(lineage!.toolCalls.every((c) => stepIds.has(c.stepId))).toBe(true);
+    expect(byTool.get("run_transform")!.stepId).toBe("step-transform");
+
+    // The recorded args are the ones the tool actually ran with — the transform records the exact
+    // reviewed SQL that executed.
+    expect(byTool.get("run_transform")!.args).toEqual({
+      targetTable: "branch_balance_totals",
+      sql: TRANSFORM.sql,
+    });
+    expect(byTool.get("land_parquet")!.args).toMatchObject({
+      dataset: "loans.csv",
+      ingestionDate: "2026-07-17",
+    });
+
+    // FR12: every executed DQ check is recorded, not just the aggregate the step detail carries.
+    expect(lineage!.dqResults.length).toBe(4);
+    expect(lineage!.dqResults.every((r) => r.passed)).toBe(true);
+    expect(new Set(lineage!.dqResults.map((r) => r.checkName))).toEqual(
+      new Set(["rows present", "id not null", "branch present", "fresh"]),
+    );
+    expect(lineage!.dqResults.every((r) => r.detail !== null)).toBe(true);
+
+    // The lineage carries the run and its six steps alongside those records.
+    expect(lineage!.run.status).toBe("success");
+    expect(lineage!.steps.length).toBe(6);
+  });
+
+  it("records the DQ results that blocked publish when a check fails", async () => {
+    const { store, runId, steps, source, landingDir, servingDir } = await scaffold();
+    const FAILING_DQ: DqSpec = {
+      targetTable: "raw.source",
+      checks: [
+        { name: "rows present", type: "row_count", column: null, description: "at least one row" },
+        { name: "id not null", type: "not_null", column: "loan_id", description: "loan_id not null" },
+        // The fixture's row 2 has a null balance, so this check fails.
+        { name: "balance not null", type: "not_null", column: "balance", description: "balance set" },
+        { name: "branch present", type: "schema", column: "branch", description: "branch exists" },
+      ],
+    };
+
+    await runPipeline({
+      store,
+      runId,
+      steps,
+      source,
+      transform: TRANSFORM,
+      dqSpec: FAILING_DQ,
+      landingDir,
+      servingDir,
+      ingestionDate: "2026-07-17",
+      approve: async () => "approve",
+    });
+
+    const lineage = await getRunLineage(store, runId);
+
+    // The record of WHY publish was blocked is what makes the FR7 block auditable: all four checks
+    // are recorded even though the run aborted, and exactly the failing one reads false.
+    expect(lineage!.dqResults.length).toBe(4);
+    const failed = lineage!.dqResults.filter((r) => !r.passed);
+    expect(failed.map((r) => r.checkName)).toEqual(["balance not null"]);
+    expect(failed[0]!.detail).toMatch(/balance/i);
+
+    // run_dq_check itself SUCCEEDED — it reports pass/fail rather than throwing — so the record
+    // shows a successful call whose outcome then failed the stage.
+    const dqCall = lineage!.toolCalls.find((c) => c.tool === "run_dq_check");
+    expect(dqCall!.status).toBe("success");
+    expect(dqCall!.result).toMatch(/1 of 4 DQ checks failed against raw\.source/);
+
+    // publish_serving never ran, so it left no tool call at all (FR7).
+    expect(lineage!.toolCalls.map((c) => c.tool)).not.toContain("publish_serving");
+    expect(lineage!.run.status).toBe("failed");
+  });
+
+  it("records a rejected run's lineage: no tool call for the gate a human denied", async () => {
+    const { store, runId, steps, source, landingDir, servingDir } = await scaffold();
+    await runPipeline({
+      store,
+      runId,
+      steps,
+      source,
+      transform: TRANSFORM,
+      dqSpec: PASSING_DQ,
+      landingDir,
+      servingDir,
+      ingestionDate: "2026-07-17",
+      approve: async (request) => (request.tool === "land_parquet" ? "reject" : "approve"),
+    });
+
+    const lineage = await getRunLineage(store, runId);
+
+    // Nothing executed: the rejected tool left no call record, which is the lineage evidence that
+    // a denied gate really does stop execution (FR8) rather than merely marking a step failed.
+    expect(lineage!.toolCalls).toEqual([]);
+    expect(lineage!.dqResults).toEqual([]);
+    expect(lineage!.run.status).toBe("rejected");
+  });
+
+  it("records a failed tool call with its error", async () => {
+    const { store, runId, steps, source, landingDir, servingDir } = await scaffold();
+    await runPipeline({
+      store,
+      runId,
+      steps,
+      source,
+      // A transform whose SQL is valid but writes a different table than it claims: run_transform's
+      // marts read-back throws, so the tool call fails for a real reason.
+      transform: { ...TRANSFORM, targetTable: "never_created" },
+      dqSpec: PASSING_DQ,
+      landingDir,
+      servingDir,
+      ingestionDate: "2026-07-17",
+      approve: async () => "approve",
+    });
+
+    const lineage = await getRunLineage(store, runId);
+    const failedCall = lineage!.toolCalls.find((c) => c.tool === "run_transform");
+
+    expect(failedCall!.status).toBe("failed");
+    expect(failedCall!.error).toBeTruthy();
+    expect(failedCall!.result).toBeNull();
+    expect(failedCall!.finishedAt).not.toBeNull();
+    // The two tools that ran before it stayed successful — a failure is recorded, not retroactive.
+    expect(lineage!.toolCalls.filter((c) => c.status === "success").map((c) => c.tool)).toEqual([
+      "land_parquet",
+      "load_warehouse",
+    ]);
+    expect(lineage!.run.status).toBe("failed");
   });
 
   it("persists the terminal state independently of the returned value", async () => {
