@@ -11,6 +11,11 @@ import {
   DEFAULT_SERVING_FORMAT,
   SERVE_ROUTE_PREFIX,
   SERVING_FORMATS,
+  ServedDataSchema,
+  ServedQuerySchema,
+  toJsonCell,
+  SERVED_PAGE_DEFAULT_LIMIT,
+  SERVED_PAGE_MAX_LIMIT,
 } from "./serving.js";
 
 /**
@@ -142,5 +147,124 @@ describe("ServedTableSchema", () => {
 
   it("requires a name, since the name is the served endpoint's identity", () => {
     expect(() => ServedTableSchema.parse({ ...served, name: "" })).toThrow();
+  });
+});
+
+/**
+ * Pure-contract tests for the serving *read* layer (T5.3 / PRD FR10): the page query the
+ * generated REST endpoint accepts, the JSON-safety coercion every served cell passes through,
+ * and the served-data response's shape.
+ */
+describe("served page query", () => {
+  it("defaults to a preview page when the caller asks for nothing", () => {
+    expect(ServedQuerySchema.parse({})).toEqual({
+      limit: SERVED_PAGE_DEFAULT_LIMIT,
+      offset: 0,
+    });
+  });
+
+  it("coerces the string values a query string actually delivers", () => {
+    expect(ServedQuerySchema.parse({ limit: "25", offset: "50" })).toEqual({
+      limit: 25,
+      offset: 50,
+    });
+  });
+
+  it("rejects a page that is not a usable number rather than clamping it", () => {
+    expect(() => ServedQuerySchema.parse({ limit: "abc" })).toThrow();
+    expect(() => ServedQuerySchema.parse({ limit: "0" })).toThrow();
+    expect(() => ServedQuerySchema.parse({ limit: "-1" })).toThrow();
+    expect(() => ServedQuerySchema.parse({ limit: "1.5" })).toThrow();
+    expect(() => ServedQuerySchema.parse({ offset: "-1" })).toThrow();
+  });
+
+  it("caps the page size so one request cannot ask for unbounded work", () => {
+    expect(ServedQuerySchema.parse({ limit: String(SERVED_PAGE_MAX_LIMIT) }).limit).toBe(
+      SERVED_PAGE_MAX_LIMIT,
+    );
+    expect(() => ServedQuerySchema.parse({ limit: String(SERVED_PAGE_MAX_LIMIT + 1) })).toThrow();
+  });
+});
+
+describe("toJsonCell", () => {
+  it("passes JSON-native values through untouched", () => {
+    expect(toJsonCell("north")).toBe("north");
+    expect(toJsonCell(1750.75)).toBe(1750.75);
+    expect(toJsonCell(0)).toBe(0);
+    expect(toJsonCell(false)).toBe(false);
+  });
+
+  it("maps absent values to null", () => {
+    expect(toJsonCell(null)).toBeNull();
+    expect(toJsonCell(undefined)).toBeNull();
+  });
+
+  it("converts a DuckDB BIGINT, which JSON.stringify would otherwise throw on", () => {
+    expect(toJsonCell(42n)).toBe(42);
+    expect(toJsonCell(BigInt(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
+    expect(toJsonCell(BigInt(Number.MIN_SAFE_INTEGER))).toBe(Number.MIN_SAFE_INTEGER);
+    expect(() => JSON.stringify({ v: toJsonCell(42n) })).not.toThrow();
+  });
+
+  it("keeps a bigint beyond the safe range exact by stringifying it, never rounding it", () => {
+    const beyond = BigInt(Number.MAX_SAFE_INTEGER) + 2n;
+    expect(toJsonCell(beyond)).toBe("9007199254740993");
+    // The whole point: Number() would silently answer 9007199254740992 instead.
+    expect(toJsonCell(beyond)).not.toBe(Number(beyond));
+    expect(toJsonCell(-beyond)).toBe("-9007199254740993");
+  });
+
+  it("renders warehouse value objects (DATE/TIMESTAMP/DECIMAL) via their toString", () => {
+    // Stand-ins with the shape DuckDB returns: an object whose toString is the faithful text.
+    expect(toJsonCell({ toString: () => "2026-07-17" })).toBe("2026-07-17");
+    expect(toJsonCell({ toString: () => "1.25" })).toBe("1.25");
+  });
+
+  it("renders a Date as an ISO string", () => {
+    expect(toJsonCell(new Date("2026-07-17T10:00:00.000Z"))).toBe("2026-07-17T10:00:00.000Z");
+  });
+});
+
+describe("ServedDataSchema", () => {
+  const data = {
+    name: "branch_balance_totals",
+    schema: "marts",
+    table: "branch_balance_totals",
+    qualifiedTable: "marts.branch_balance_totals",
+    format: "csv",
+    endpoint: "/api/serve/branch_balance_totals",
+    csvEndpoint: "/api/serve/branch_balance_totals.csv",
+    publishedAt: "2026-07-17 00:00:00",
+    columns: [
+      { name: "branch", type: "VARCHAR" },
+      { name: "total_balance", type: "DOUBLE" },
+    ],
+    rowCount: 2,
+    rows: [
+      { branch: "north", total_balance: 1750.75 },
+      { branch: "south", total_balance: 0 },
+    ],
+    limit: 100,
+    offset: 0,
+  };
+
+  it("accepts a served page and allows an empty table", () => {
+    expect(ServedDataSchema.parse(data)).toEqual(data);
+    expect(ServedDataSchema.parse({ ...data, rowCount: 0, rows: [] }).rows).toEqual([]);
+  });
+
+  it("accepts the cell types a served row can carry", () => {
+    const rows = [{ s: "x", n: 1.5, b: true, empty: null, big: "9007199254740993" }];
+    expect(ServedDataSchema.parse({ ...data, rows }).rows).toEqual(rows);
+  });
+
+  it("pins the served schema to marts — only published transform output is queryable", () => {
+    expect(() => ServedDataSchema.parse({ ...data, schema: "raw" })).toThrow();
+  });
+
+  it("rejects a page whose bounds are nonsense", () => {
+    expect(() => ServedDataSchema.parse({ ...data, limit: 0 })).toThrow();
+    expect(() => ServedDataSchema.parse({ ...data, offset: -1 })).toThrow();
+    expect(() => ServedDataSchema.parse({ ...data, rowCount: -1 })).toThrow();
   });
 });

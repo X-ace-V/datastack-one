@@ -57,6 +57,35 @@ export function servedEndpoint(name: string): string {
   return `${SERVE_ROUTE_PREFIX}/${name}`;
 }
 
+/**
+ * Rows a served endpoint returns when the caller does not ask for a page size. A preview-sized
+ * default keeps `GET /api/serve/:name` from serializing an arbitrarily large table into one
+ * response; a caller that wants everything pages through it with `limit`/`offset`, or downloads
+ * the CSV endpoint, which streams the whole export.
+ */
+export const SERVED_PAGE_DEFAULT_LIMIT = 100;
+
+/** Hard cap on a served page, bounding the work one request can ask the warehouse for. */
+export const SERVED_PAGE_MAX_LIMIT = 1000;
+
+/**
+ * Query string accepted by `GET /api/serve/:name` (FR10). Values arrive as strings, so both are
+ * coerced and then range-checked — a non-numeric, zero, negative or over-cap page is a bad
+ * request (400), never a silently clamped one.
+ */
+export const ServedQuerySchema = z.object({
+  /** Maximum rows to return in this page. */
+  limit: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SERVED_PAGE_MAX_LIMIT)
+    .default(SERVED_PAGE_DEFAULT_LIMIT),
+  /** Rows to skip before the page starts. */
+  offset: z.coerce.number().int().nonnegative().default(0),
+});
+export type ServedQuery = z.infer<typeof ServedQuerySchema>;
+
 /** The endpoint a served name downloads as CSV from (FR10). */
 export function servedCsvEndpoint(name: string): string {
   return `${SERVE_ROUTE_PREFIX}/${name}.csv`;
@@ -139,3 +168,83 @@ export const ServedTableSchema = z.object({
   publishedAt: z.string().min(1),
 });
 export type ServedTable = z.infer<typeof ServedTableSchema>;
+
+/**
+ * One cell of served data, reduced to what JSON can carry losslessly. The warehouse hands back
+ * richer runtime values (see {@link toJsonCell}), so every cell passes through that coercion
+ * before it reaches a response.
+ */
+export const ServedCellSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+export type ServedCell = z.infer<typeof ServedCellSchema>;
+
+/**
+ * Coerce one warehouse value into a JSON-safe cell.
+ *
+ * DuckDB does not return plain JSON values: a `BIGINT` arrives as a `bigint` (which
+ * `JSON.stringify` throws on outright), and `DATE`/`TIMESTAMP`/`DECIMAL` arrive as value objects
+ * whose `toString()` is the faithful rendering. Both are converted here rather than in a route, so
+ * every served response is serializable by construction.
+ *
+ * A `bigint` outside the IEEE-754 safe-integer range becomes a **string**, not a number: JSON's
+ * number type cannot represent it, so converting it would silently return a different value than
+ * the warehouse holds. Losing the type is honest; losing the value is not.
+ */
+export function toJsonCell(value: unknown): ServedCell {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "bigint") {
+    return value >= BigInt(Number.MIN_SAFE_INTEGER) && value <= BigInt(Number.MAX_SAFE_INTEGER)
+      ? Number(value)
+      : value.toString();
+  }
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
+/** A served table's column as reported by the export it is read from. */
+export const ServedColumnSchema = z.object({
+  /** Column name. */
+  name: z.string().min(1),
+  /** Column type as DuckDB reports it (e.g. `VARCHAR`, `DOUBLE`, `DATE`). */
+  type: z.string().min(1),
+});
+export type ServedColumn = z.infer<typeof ServedColumnSchema>;
+
+/**
+ * The payload `GET /api/serve/:name` returns (FR10: "queryable (REST)") — the served table's
+ * identity and endpoints, its columns, the total rows available, and the requested page of them.
+ *
+ * `rowCount` is the **total** rows served, not `rows.length`: a client reading a page still learns
+ * how much there is to page through.
+ */
+export const ServedDataSchema = z.object({
+  /** Served name — the `:name` segment this data was requested at. */
+  name: z.string().min(1),
+  /** Schema the served table lives in — always `marts`. */
+  schema: z.literal(MARTS_SCHEMA),
+  /** Unqualified name of the served `marts` table. */
+  table: z.string().min(1),
+  /** Fully-qualified `marts.<table>` name behind this endpoint. */
+  qualifiedTable: z.string().min(1),
+  /** Format of the published export this data is read from. */
+  format: z.enum(SERVING_FORMATS),
+  /** This endpoint's own URL. */
+  endpoint: z.string().min(1),
+  /** The companion endpoint the same data downloads as CSV from. */
+  csvEndpoint: z.string().min(1),
+  /** When the served name was last published. */
+  publishedAt: z.string().min(1),
+  /** Columns of the served table, in export order. */
+  columns: z.array(ServedColumnSchema),
+  /** Total rows served — independent of how many this page returned. */
+  rowCount: z.number().int().nonnegative(),
+  /** The requested page of rows. */
+  rows: z.array(z.record(z.string(), ServedCellSchema)),
+  /** Page size that was applied. */
+  limit: z.number().int().positive(),
+  /** Rows skipped before this page. */
+  offset: z.number().int().nonnegative(),
+});
+export type ServedData = z.infer<typeof ServedDataSchema>;

@@ -34,6 +34,13 @@ import {
   listSources,
   updateSourceRowCount,
 } from "./store/sources.js";
+import { ServedQuerySchema, servedCsvFilename } from "./core/serving.js";
+import { getServedTable } from "./store/serving.js";
+import {
+  ServedExportMissingError,
+  openServedCsv,
+  readServedData,
+} from "./serving/reader.js";
 import { profileSource } from "./tools/profile.js";
 import { DEFAULT_ARTIFACTS_DIR, writeArtifact } from "./tools/rules.js";
 import { getLatestArtifactByKind } from "./store/artifacts.js";
@@ -916,6 +923,80 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     });
 
     return reply;
+  });
+
+  // FR10 (T5.3): the generated REST endpoint — query the table published under `:name`. The
+  // publish stage registered the name; this resolves it back to its published export and returns
+  // a page of rows with the columns and the total row count. `:name` is looked up exactly as
+  // requested (bound as a parameter, never sanitized here): the registry only ever holds
+  // sanitized names, so an unregistered spelling honestly misses rather than being rewritten
+  // into a hit. Status map: 503 unwired store, 400 bad page, 404 nothing served at that name,
+  // 410 registered but its export is gone, 200 the data.
+  app.get<{ Params: { name: string }; Querystring: unknown }>(
+    "/api/serve/:name",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "served table store unavailable" });
+      }
+
+      const parsed = ServedQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid serve query", details: parsed.error.issues });
+      }
+
+      const served = await getServedTable(deps.store, req.params.name);
+      if (!served) {
+        return reply
+          .code(404)
+          .send({ error: `no table is served at "${req.params.name}"` });
+      }
+
+      try {
+        return reply.code(200).send(await readServedData(deps.store, served, parsed.data));
+      } catch (err) {
+        if (err instanceof ServedExportMissingError) {
+          return reply.code(410).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // FR10 (T5.3): download the table published under `:name` as CSV. Serves the export the publish
+  // stage generated and verified — the same bytes the JSON endpoint above reads — streamed with an
+  // attachment disposition so a browser saves it as a file. The `.csv` suffix is a static part of
+  // this route, so it is matched ahead of the parametric route above and never reaches it as part
+  // of the name; the filename needs no escaping because a served name is sanitized at publish time
+  // to `[A-Za-z0-9_-]`. Status map matches the JSON endpoint.
+  app.get<{ Params: { name: string } }>("/api/serve/:name.csv", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "served table store unavailable" });
+    }
+
+    const served = await getServedTable(deps.store, req.params.name);
+    if (!served) {
+      return reply.code(404).send({ error: `no table is served at "${req.params.name}"` });
+    }
+
+    try {
+      const { stream, size } = await openServedCsv(served);
+      return reply
+        .code(200)
+        .header("content-type", "text/csv; charset=utf-8")
+        .header("content-length", size)
+        .header(
+          "content-disposition",
+          `attachment; filename="${servedCsvFilename(served.name)}"`,
+        )
+        .send(stream);
+    } catch (err) {
+      if (err instanceof ServedExportMissingError) {
+        return reply.code(410).send({ error: err.message });
+      }
+      throw err;
+    }
   });
 
   // FR8: resolve a pending permission request. The bridge captured it from the runtime's
