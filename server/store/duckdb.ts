@@ -42,6 +42,7 @@ export const PLATFORM_TABLES = [
   "artifacts",
   "dq_results",
   "approvals",
+  "served_tables",
 ] as const;
 
 export type PlatformTable = (typeof PLATFORM_TABLES)[number];
@@ -129,6 +130,23 @@ const MIGRATION_STATEMENTS: readonly string[] = [
      action     VARCHAR NOT NULL DEFAULT 'pending',
      created_at TIMESTAMP NOT NULL DEFAULT now(),
      decided_at TIMESTAMP
+   );`,
+
+  // FR10 — the served-table registry the publish stage writes and the generated
+  // `/api/serve/:name` endpoints read. Unlike the log tables above this is a registry keyed by
+  // the served `name`: that name is the endpoint's URL segment, so exactly one table may answer
+  // it and re-publishing a name replaces the row rather than appending a second claim on the
+  // same URL. The run/approval history of each publish lives in `runs`/`approvals` (FR12).
+  `CREATE TABLE IF NOT EXISTS platform.served_tables (
+     name         VARCHAR PRIMARY KEY,
+     project_id   VARCHAR NOT NULL,
+     run_id       VARCHAR,
+     schema_name  VARCHAR NOT NULL,
+     table_name   VARCHAR NOT NULL,
+     format       VARCHAR NOT NULL DEFAULT 'csv',
+     row_count    BIGINT NOT NULL,
+     csv_path     VARCHAR NOT NULL,
+     published_at TIMESTAMP NOT NULL DEFAULT now()
    );`,
 ];
 

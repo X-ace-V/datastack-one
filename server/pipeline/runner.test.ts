@@ -1,9 +1,10 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openStore, type WarehouseStore } from "../store/duckdb.js";
 import { createRun, getRunState, insertRunStep } from "../store/runs.js";
+import { getServedTable } from "../store/serving.js";
 import { PIPELINE_STAGES, type RunApprovalRequest, type RunEvent, type RunStep } from "../core/run.js";
 import type { Source } from "../core/sources.js";
 import type { Transform } from "../core/transform.js";
@@ -11,15 +12,16 @@ import type { DqSpec } from "../core/dq.js";
 import { runPipeline } from "./runner.js";
 
 /**
- * Integration test for the scripted pipeline runner (T4.4 / PRD FR8/FR9) against real DuckDB and a
- * real landing dir on disk. It runs Extract → Land → Load → Transform end to end with an
- * auto-approver and asserts the desired result: the marts table is materialized with the exact
- * aggregation, the run + every step reach `success`, each gated stage requested approval showing
- * the right tool/SQL, and the progress events were emitted in order. It also proves the two
- * abort paths — a human rejection and a stage failure — leave the run in the right terminal state
- * with downstream steps untouched.
+ * Integration test for the scripted pipeline runner (T4.4/T5.1/T5.2 / PRD FR7/FR8/FR9/FR10) against
+ * real DuckDB and a real landing + serving dir on disk. It runs Extract → Land → Load → Transform →
+ * DQ → Publish end to end with an auto-approver and asserts the desired result: the marts table is
+ * materialized with the exact aggregation, it is served and downloadable as CSV, the run + every
+ * step reach `success`, each gated stage requested approval showing the right tool/SQL, and the
+ * progress events were emitted in order. It also proves the three abort paths — a human rejection,
+ * a stage failure, and a failed DQ check — leave the run in the right terminal state with
+ * downstream steps untouched and nothing published.
  */
-describe("pipeline runner (Extract → Land → Load → Transform)", () => {
+describe("pipeline runner (Extract → Land → Load → Transform → DQ → Publish)", () => {
   const open: WarehouseStore[] = [];
   const tempDirs: string[] = [];
 
@@ -64,6 +66,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
     steps: RunStep[];
     source: Source;
     landingDir: string;
+    servingDir: string;
   }> {
     const store = await openStore(":memory:");
     open.push(store);
@@ -96,11 +99,18 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       rowCount: 3,
       createdAt: "2026-07-17 00:00:00",
     };
-    return { store, runId: run.id, steps, source, landingDir: join(dir, "landing") };
+    return {
+      store,
+      runId: run.id,
+      steps,
+      source,
+      landingDir: join(dir, "landing"),
+      servingDir: join(dir, "serving"),
+    };
   }
 
-  it("runs every stage to success and materializes marts with the exact aggregation", async () => {
-    const { store, runId, steps, source, landingDir } = await scaffold();
+  it("runs every stage to success, materializes marts, and serves it as CSV", async () => {
+    const { store, runId, steps, source, landingDir, servingDir } = await scaffold();
     const requests: RunApprovalRequest[] = [];
     const events: RunEvent[] = [];
 
@@ -112,6 +122,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       transform: TRANSFORM,
       dqSpec: PASSING_DQ,
       landingDir,
+      servingDir,
       ingestionDate: "2026-07-17",
       approve: async (request) => {
         requests.push(request);
@@ -128,6 +139,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       "load",
       "transform",
       "dq",
+      "publish",
     ]);
     expect(state.steps.every((s) => s.status === "success")).toBe(true);
     // Step details reflect what actually happened at each stage.
@@ -136,17 +148,24 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
     expect(state.steps[2]!.detail).toMatch(/loaded 3 rows → raw\.source/);
     expect(state.steps[3]!.detail).toMatch(/materialized 2 rows → marts\.branch_balance_totals/);
     expect(state.steps[4]!.detail).toMatch(/4 DQ checks passed against raw\.source/);
+    expect(state.steps[5]!.detail).toMatch(
+      /published 2 rows → \/api\/serve\/branch_balance_totals/,
+    );
     // Started/finished timestamps were stamped.
     expect(state.steps.every((s) => s.startedAt && s.finishedAt)).toBe(true);
 
-    // The three gated tools each requested approval, in order, with the transform's exact SQL.
+    // The four gated tools each requested approval, in order, with the exact SQL where there is
+    // one to show (the transform's statement and the publish's COPY).
     expect(requests.map((r) => r.tool)).toEqual([
       "land_parquet",
       "load_warehouse",
       "run_transform",
+      "publish_serving",
     ]);
     expect(requests[2]!.sql).toBe(TRANSFORM.sql);
     expect(requests[0]!.sql).toBeNull();
+    expect(requests[3]!.sql).toContain(`COPY (SELECT * FROM "marts"."branch_balance_totals")`);
+    expect(requests[3]!.sql).toContain("(FORMAT CSV, HEADER)");
 
     // The marts table holds the coalesced per-branch totals.
     const rows = await store.all(
@@ -157,18 +176,36 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       { branch: "south", total_balance: 0 },
     ]);
 
+    // FR10: the report is registered as a served endpoint and downloadable as CSV on disk.
+    const served = await getServedTable(store, "branch_balance_totals");
+    expect(served).toMatchObject({
+      projectId: "p1",
+      runId,
+      qualifiedTable: "marts.branch_balance_totals",
+      format: "csv",
+      rowCount: 2,
+      endpoint: "/api/serve/branch_balance_totals",
+      csvEndpoint: "/api/serve/branch_balance_totals.csv",
+    });
+    // Header first, then every marts row. Row order is deliberately not asserted: the transform's
+    // GROUP BY carries no ORDER BY and the export is a plain SELECT *, so the order the engine
+    // returns groups in is not part of the served contract — the rows and values are.
+    const csvLines = (await readFile(served!.csvPath, "utf8")).trimEnd().split("\n");
+    expect(csvLines[0]).toBe("branch,total_balance");
+    expect(csvLines.slice(1).sort()).toEqual(["north,1750.75", "south,0.0"]);
+
     // Progress events bracket the run and cover each step + approval pair.
     expect(events[0]).toEqual({ kind: "run.status", runId, status: "running" });
     expect(events.at(-1)).toEqual({ kind: "run.status", runId, status: "success" });
-    expect(events.filter((e) => e.kind === "approval.requested")).toHaveLength(3);
-    expect(events.filter((e) => e.kind === "approval.resolved")).toHaveLength(3);
+    expect(events.filter((e) => e.kind === "approval.requested")).toHaveLength(4);
+    expect(events.filter((e) => e.kind === "approval.resolved")).toHaveLength(4);
     expect(
       events.filter((e) => e.kind === "step.status" && e.status === "success"),
-    ).toHaveLength(5);
+    ).toHaveLength(6);
   });
 
   it("aborts the run as 'rejected' when a human rejects the first gated stage", async () => {
-    const { store, runId, steps, source, landingDir } = await scaffold();
+    const { store, runId, steps, source, landingDir, servingDir } = await scaffold();
 
     const state = await runPipeline({
       store,
@@ -178,6 +215,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       transform: TRANSFORM,
       dqSpec: PASSING_DQ,
       landingDir,
+      servingDir,
       ingestionDate: "2026-07-17",
       // Reject the land stage; approve anything else (never reached).
       approve: async (request) => (request.tool === "land_parquet" ? "reject" : "approve"),
@@ -191,6 +229,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
     // Downstream stages never ran.
     expect(byName.get("load")!.status).toBe("pending");
     expect(byName.get("transform")!.status).toBe("pending");
+    expect(byName.get("publish")!.status).toBe("pending");
 
     // Nothing was landed/loaded/transformed.
     const marts = await store.all(
@@ -198,10 +237,12 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
         `WHERE table_schema = 'marts'`,
     );
     expect(Number(marts[0]?.n)).toBe(0);
+    // And nothing was published — a rejected write never reaches an endpoint.
+    expect(await getServedTable(store, "branch_balance_totals")).toBeNull();
   });
 
   it("aborts the run as 'failed' when a stage errors", async () => {
-    const { store, runId, steps, source, landingDir } = await scaffold();
+    const { store, runId, steps, source, landingDir, servingDir } = await scaffold();
 
     const state = await runPipeline({
       store,
@@ -216,6 +257,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       },
       dqSpec: PASSING_DQ,
       landingDir,
+      servingDir,
       ingestionDate: "2026-07-17",
       approve: async () => "approve",
     });
@@ -229,7 +271,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
   });
 
   it("fails the run when a DQ check fails, blocking publish", async () => {
-    const { store, runId, steps, source, landingDir } = await scaffold();
+    const { store, runId, steps, source, landingDir, servingDir } = await scaffold();
 
     // A spec whose not_null check targets `balance` — which has a null in the fixture — so the DQ
     // stage fails even though extract/land/load/transform all succeeded.
@@ -256,6 +298,9 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       transform: TRANSFORM,
       dqSpec: FAILING_DQ,
       landingDir,
+      servingDir,
+      // A publish approval would be a bug here — the DQ failure must stop the run before the
+      // gate is ever offered, so approving everything cannot rescue it.
       ingestionDate: "2026-07-17",
       approve: async () => "approve",
     });
@@ -274,10 +319,18 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       `SELECT count(*)::BIGINT AS n FROM marts.branch_balance_totals`,
     );
     expect(Number(marts[0]?.n)).toBe(2);
+
+    // FR7's actual requirement: publish never ran. The stage stayed pending, no endpoint was
+    // registered, and no CSV was exported — even though every approval was granted.
+    expect(byName.get("publish")!.status).toBe("pending");
+    expect(await getServedTable(store, "branch_balance_totals")).toBeNull();
+    await expect(
+      readFile(join(servingDir, "p1", "branch_balance_totals.csv"), "utf8"),
+    ).rejects.toThrow();
   });
 
   it("persists the terminal state independently of the returned value", async () => {
-    const { store, runId, steps, source, landingDir } = await scaffold();
+    const { store, runId, steps, source, landingDir, servingDir } = await scaffold();
     await runPipeline({
       store,
       runId,
@@ -286,6 +339,7 @@ describe("pipeline runner (Extract → Land → Load → Transform)", () => {
       transform: TRANSFORM,
       dqSpec: PASSING_DQ,
       landingDir,
+      servingDir,
       ingestionDate: "2026-07-17",
       approve: async () => "approve",
     });

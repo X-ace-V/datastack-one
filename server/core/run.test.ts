@@ -9,35 +9,43 @@ import {
   RUN_STATUSES,
   STEP_STATUSES,
 } from "./run.js";
+import { isAskTool } from "../opencode/config.js";
 
 /** Pure-contract tests for the run schemas + the pipeline stage list (T4.4). */
 describe("PIPELINE_STAGES", () => {
-  it("is the ordered Extract → Land → Load → Transform → DQ pipeline", () => {
+  it("is the ordered Extract → Land → Load → Transform → DQ → Publish pipeline", () => {
     expect(PIPELINE_STAGES.map((s) => s.name)).toEqual([
       "extract",
       "land",
       "load",
       "transform",
       "dq",
+      "publish",
     ]);
+    // PRD §5 requires the run to show ≥5 visible pipeline tasks.
+    expect(PIPELINE_STAGES.length).toBeGreaterThanOrEqual(5);
   });
 
-  it("gates exactly the three write/execute tools, and only those", () => {
+  it("gates exactly the four write/execute tools, and only those", () => {
     const gated = PIPELINE_STAGES.filter((s) => s.gated);
     expect(gated.map((s) => s.tool)).toEqual([
       "land_parquet",
       "load_warehouse",
       "run_transform",
+      "publish_serving",
     ]);
-    // Every gated stage names a tool.
+    // Every gated stage names a tool, and every gated tool is on the ask-list (FR8).
     expect(gated.every((s) => s.tool !== null)).toBe(true);
+    expect(gated.every((s) => isAskTool(s.tool!))).toBe(true);
     // The read-only extract stage names no tool and is not gated.
     expect(PIPELINE_STAGES.find((s) => s.name === "extract")!.gated).toBe(false);
     // The DQ stage names a tool (run_dq_check) but is NOT gated — it runs read-only checks; a
-    // DQ failure blocks the run rather than pausing for approval (FR7).
+    // DQ failure blocks the run rather than pausing for approval (FR7). So `gated` is narrower
+    // than "names a tool", and the gated set is asserted explicitly above rather than derived.
     const dq = PIPELINE_STAGES.find((s) => s.name === "dq")!;
     expect(dq.tool).toBe("run_dq_check");
     expect(dq.gated).toBe(false);
+    expect(isAskTool(dq.tool!)).toBe(false);
   });
 });
 

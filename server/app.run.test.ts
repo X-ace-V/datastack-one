@@ -114,19 +114,20 @@ describe("run routes", () => {
         "load",
         "transform",
         "dq",
+        "publish",
       ]);
 
       // The launcher was handed the created run, steps, resolved source, parsed transform + DQ spec.
       expect(calls).toHaveLength(1);
       expect(calls[0]!.run.id).toBe(body.run.id);
-      expect(calls[0]!.steps).toHaveLength(5);
+      expect(calls[0]!.steps).toHaveLength(6);
       expect(calls[0]!.source.id).toBe("src1");
       expect(calls[0]!.transform).toEqual(TRANSFORM);
       expect(calls[0]!.dqSpec).toEqual(DQ_SPEC);
 
       // The run + steps were persisted before the launch.
       const state = await getRunState(store, body.run.id);
-      expect(state?.steps).toHaveLength(5);
+      expect(state?.steps).toHaveLength(6);
     });
 
     it("404s an unknown project and a cross-project source", async () => {
@@ -254,7 +255,7 @@ describe("run routes", () => {
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.run.id).toBe(runId);
-      expect(body.steps).toHaveLength(5);
+      expect(body.steps).toHaveLength(6);
       expect(body.approvals).toHaveLength(1);
       expect(body.approvals[0].requestID).toBe("req1");
     });

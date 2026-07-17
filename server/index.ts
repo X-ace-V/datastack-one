@@ -6,6 +6,7 @@ import { createApprovalGate } from "./opencode/approvals.js";
 import { createRunApprovalGate } from "./pipeline/run-approvals.js";
 import { runPipeline } from "./pipeline/runner.js";
 import { DEFAULT_LANDING_DIR } from "./tools/land.js";
+import { DEFAULT_SERVING_DIR } from "./tools/serve.js";
 
 /** Boot entrypoint: start the OpenCode runtime, then bind the HTTP server. */
 const PORT = Number(process.env.PORT ?? 3001);
@@ -40,6 +41,7 @@ async function main(): Promise<void> {
       transform,
       dqSpec,
       landingDir: DEFAULT_LANDING_DIR,
+      servingDir: DEFAULT_SERVING_DIR,
       approve: (request) => runApprovals.request(request),
       emit: (event) => bridge.publish(run.id, { event: event.kind, data: event }),
     }).catch((error) => console.error(`pipeline run ${run.id} failed:`, error));

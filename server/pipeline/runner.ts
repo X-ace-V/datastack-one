@@ -17,6 +17,7 @@ import { landParquet } from "../tools/land.js";
 import { loadWarehouse } from "../tools/warehouse.js";
 import { runTransform } from "../tools/transform.js";
 import { runDqCheck } from "../tools/dq.js";
+import { planPublishServing, publishServing } from "../tools/serve.js";
 import {
   completeRunStep,
   getRunState,
@@ -25,15 +26,15 @@ import {
 } from "../store/runs.js";
 
 /**
- * The scripted pipeline runner (TASKS T4.4/T5.1, PRD FR7/FR8/FR9, ARCHITECTURE §3.3, §4). It drives
- * the run through its ordered stages deterministically — Extract → Land → Load → Transform → DQ,
- * every stage whose tool exists today (the Publish stage joins when T5.2 lands its tool). Each
- * stage's status is persisted to `platform.run_steps` and emitted for the SSE stream (FR9); before
- * every `ask` tool (land/load/transform) the runner parks on {@link RunPipelineDeps.approve} and
- * does not execute until a human approves, so nothing writes or executes unapproved (FR8). A reject
- * aborts the run; a data-quality failure in the DQ stage also aborts it, so a later Publish stage
- * never runs (FR7). An I/O module (DuckDB via the tools + the run store), so it lives under
- * `server/pipeline`; the schemas and stage list are the pure {@link file://../core/run.ts}.
+ * The scripted pipeline runner (TASKS T4.4/T5.1/T5.2, PRD FR7/FR8/FR9/FR10, ARCHITECTURE §3.3, §4).
+ * It drives the run through its ordered stages deterministically — Extract → Land → Load →
+ * Transform → DQ → Publish, the six visible tasks. Each stage's status is persisted to
+ * `platform.run_steps` and emitted for the SSE stream (FR9); before every `ask` tool
+ * (land/load/transform/publish) the runner parks on {@link RunPipelineDeps.approve} and does not
+ * execute until a human approves, so nothing writes or executes unapproved (FR8). A reject aborts
+ * the run; a data-quality failure in the DQ stage also aborts it, so Publish never runs on bad data
+ * (FR7). An I/O module (DuckDB via the tools + the run store), so it lives under `server/pipeline`;
+ * the schemas and stage list are the pure {@link file://../core/run.ts}.
  */
 
 /** Everything the runner needs to execute one run to completion. */
@@ -52,6 +53,8 @@ export interface RunPipelineDeps {
   dqSpec: DqSpec;
   /** Landing root the land stage writes Parquet under. */
   landingDir: string;
+  /** Serving root the publish stage writes the CSV export under (FR10). */
+  servingDir: string;
   /** Ingestion date to partition under; defaults to today (UTC) when omitted. */
   ingestionDate?: string;
   /** Called before each gated stage; resolves to the human's decision. Reject aborts the run. */
@@ -207,6 +210,32 @@ export async function runPipeline(deps: RunPipelineDeps): Promise<RunState> {
         throw new DqChecksFailedError(failed.map((r) => r.name));
       }
       return `${result.results.length} DQ checks passed against ${result.targetTable}`;
+    });
+
+    // Publish — gated: export the marts table to CSV and register its REST endpoint (FR10).
+    // Only reachable once every DQ check passed, since a failure aborts the run above (FR7).
+    await stage("publish", async () => {
+      const step = stepByName.get("publish")!;
+      const plan = planPublishServing({
+        servingDir: deps.servingDir,
+        projectId: deps.source.projectId,
+        runId,
+        table: deps.transform.targetTable,
+      });
+      await gate(
+        step,
+        "publish_serving",
+        `Publish ${plan.qualifiedTable} at ${plan.endpoint} and export it to CSV`,
+        plan.sql,
+        { table: plan.table, name: plan.name, format: plan.format, csvPath: plan.csvPath },
+      );
+      const served = await publishServing(store, {
+        servingDir: deps.servingDir,
+        projectId: deps.source.projectId,
+        runId,
+        table: deps.transform.targetTable,
+      });
+      return `published ${served.rowCount} rows → ${served.endpoint} (CSV ${served.csvPath})`;
     });
 
     await updateRunStatus(store, runId, "success");
