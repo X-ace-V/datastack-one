@@ -48,7 +48,7 @@ function inlineCodeSpans(markdown: string): string[] {
   return [...stripFencedCode(markdown).matchAll(/`([^`\n]+)`/g)].map((m) => group(m, 1));
 }
 
-const DOCS = ["README.md", "DEMO.md"] as const;
+const DOCS = ["README.md"] as const;
 const docText = Object.fromEntries(DOCS.map((name) => [name, readDoc(name)])) as Record<
   (typeof DOCS)[number],
   string
@@ -130,9 +130,11 @@ describe("documented API routes are registered", async () => {
 
   it("recovered a plausible API surface", () => {
     // Guards both the parse and the doc scrape: without this, an empty set on either side
-    // would make the subset assertions below pass while proving nothing.
-    expect(registered.size).toBeGreaterThanOrEqual(20);
-    expect(documented.size).toBeGreaterThanOrEqual(20);
+    // would make the subset assertions below pass while proving nothing. The floor tracks the
+    // real surface, which shrank when the wizard's pipeline routes were removed — it exists to
+    // catch a parse returning nothing, not to pin a count the equality checks below already own.
+    expect(registered.size).toBeGreaterThanOrEqual(14);
+    expect(documented.size).toBeGreaterThanOrEqual(14);
   });
 
   it.each([...registered].sort())("%s is confirmed by the router", (route) => {
@@ -202,14 +204,5 @@ describe("documented ports match the code", () => {
     const target = /"\/api": "http:\/\/localhost:(\d+)"/.exec(viteSrc)?.[1];
     expect(target).toBeDefined();
     expect(allDocs).toContain(`:${target}`);
-  });
-});
-
-describe("the acceptance re-record command is real", () => {
-  it("names the env var the acceptance test reads", () => {
-    const acceptanceSrc = readFileSync(new URL("./acceptance.test.ts", import.meta.url), "utf8");
-    const documented = /ACCEPTANCE_LIVE_MODEL=1/.test(docText["README.md"]);
-    expect(documented).toBe(true);
-    expect(acceptanceSrc).toContain("ACCEPTANCE_LIVE_MODEL");
   });
 });

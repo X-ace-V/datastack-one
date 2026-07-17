@@ -1,7 +1,0 @@
-{
-  "stage": "dq",
-  "model": "opencode/big-pickle",
-  "recordedAt": "2026-07-17T10:09:15.473Z",
-  "latencyMs": 19002,
-  "response": "{\"targetTable\":\"raw.source\",\"checks\":[{\"name\":\"row_count_minimum\",\"type\":\"row_count\",\"column\":null,\"description\":\"Table must contain at least one row of data\"},{\"name\":\"customer_id_not_null\",\"type\":\"not_null\",\"column\":\"customer_id\",\"description\":\"customer_id must not contain NULL values for deduplication\"},{\"name\":\"created_at_is_date_type\",\"type\":\"schema\",\"column\":\"created_at\",\"description\":\"created_at must be DATE type for freshness validation\"},{\"name\":\"created_at_recent_dates\",\"type\":\"freshness\",\"column\":\"created_at\",\"description\":\"created_at values must be non-null and represent recent dates\"},{\"name\":\"dpd_days_not_null\",\"type\":\"not_null\",\"column\":\"dpd_days\",\"description\":\"dpd_days must not be NULL for loan_status classification\"},{\"name\":\"loan_amount_is_varchar\",\"type\":\"schema\",\"column\":\"loan_amount\",\"description\":\"loan_amount must be VARCHAR for numeric conversion\"}]}"
-}
