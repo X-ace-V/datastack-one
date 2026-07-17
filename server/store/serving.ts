@@ -124,3 +124,22 @@ export async function getServedTable(
   const row = rows[0];
   return row ? rowToServedTable(row) : null;
 }
+
+/**
+ * List the tables a project has published, most recently published first — what the Serve step
+ * (T5.4) resolves a project to, since the registry is keyed by served name and the wizard carries
+ * a project rather than a name. Scoped to the one project so another project's endpoints never
+ * appear under it. A project that has never published returns an empty list.
+ */
+export async function listServedTables(
+  store: WarehouseStore,
+  projectId: string,
+): Promise<ServedTable[]> {
+  const rows = await store.all(
+    `SELECT ${SERVED_COLUMNS} FROM platform.served_tables
+     WHERE project_id = $1
+     ORDER BY published_at DESC, name`,
+    [projectId],
+  );
+  return rows.map(rowToServedTable);
+}

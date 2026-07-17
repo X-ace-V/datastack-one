@@ -35,7 +35,7 @@ import {
   updateSourceRowCount,
 } from "./store/sources.js";
 import { ServedQuerySchema, servedCsvFilename } from "./core/serving.js";
-import { getServedTable } from "./store/serving.js";
+import { getServedTable, listServedTables } from "./store/serving.js";
 import {
   ServedExportMissingError,
   openServedCsv,
@@ -707,6 +707,27 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         getLatestArtifactByKind(deps.store, project.id, "dq_spec"),
       ]);
       return reply.code(200).send({ plan, transform, ddl, dq });
+    },
+  );
+
+  // FR10 (T5.4): list the tables a project has published, newest first, so the Serve step can
+  // resolve a project to its generated endpoints. The registry is keyed by served *name* (that
+  // name is the endpoint URL), while the wizard carries a project — this is the join between the
+  // two. Each row carries its own `/api/serve/:name` and `.csv` URLs, so the page needs no further
+  // lookup to render the endpoint or the download link. An empty list means the project has not
+  // published yet (its pipeline has not reached a successful publish stage), which is a normal
+  // state, not an error. Status map: 503 unwired store, 404 unknown project, 200 with the list.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/served",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "served table store unavailable" });
+      }
+      const project = await getProject(deps.store, req.params.id);
+      if (!project) {
+        return reply.code(404).send({ error: "project not found" });
+      }
+      return reply.code(200).send({ served: await listServedTables(deps.store, project.id) });
     },
   );
 

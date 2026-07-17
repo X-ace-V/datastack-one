@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { openStore, type WarehouseStore } from "./duckdb.js";
-import { getServedTable, registerServedTable } from "./serving.js";
+import { getServedTable, listServedTables, registerServedTable } from "./serving.js";
 
 /**
  * Unit tests for the served-table registry (T5.2 / PRD FR10/FR12) against a real in-memory
@@ -102,6 +102,73 @@ describe("served-table registry", () => {
   it("returns null for a name that was never published", async () => {
     const s = await store();
     expect(await getServedTable(s, "nope")).toBeNull();
+  });
+
+  it("lists a project's served tables, newest publish first", async () => {
+    const s = await store();
+    await registerServedTable(s, {
+      name: "older_report",
+      projectId: "p1",
+      runId: "r1",
+      table: "older_report",
+      format: "csv",
+      rowCount: 3,
+      csvPath: "/tmp/older.csv",
+    });
+    // published_at is stamped by now(); force a distinct, later timestamp so the ordering the
+    // Serve page relies on is asserted deterministically rather than racing the clock.
+    await s.run(
+      `UPDATE platform.served_tables SET published_at = TIMESTAMP '2026-07-17 09:00:00'
+       WHERE name = 'older_report'`,
+    );
+    await registerServedTable(s, {
+      name: "newer_report",
+      projectId: "p1",
+      runId: "r2",
+      table: "newer_report",
+      format: "csv",
+      rowCount: 5,
+      csvPath: "/tmp/newer.csv",
+    });
+    await s.run(
+      `UPDATE platform.served_tables SET published_at = TIMESTAMP '2026-07-17 10:00:00'
+       WHERE name = 'newer_report'`,
+    );
+
+    const listed = await listServedTables(s, "p1");
+
+    expect(listed.map((t) => t.name)).toEqual(["newer_report", "older_report"]);
+    expect(listed[0]).toMatchObject({
+      name: "newer_report",
+      rowCount: 5,
+      endpoint: "/api/serve/newer_report",
+      csvEndpoint: "/api/serve/newer_report.csv",
+    });
+  });
+
+  it("scopes the listing to one project and returns none for a project that never published", async () => {
+    const s = await store();
+    await registerServedTable(s, {
+      name: "p1_report",
+      projectId: "p1",
+      table: "p1_report",
+      format: "csv",
+      rowCount: 1,
+      csvPath: "/tmp/p1.csv",
+    });
+    await registerServedTable(s, {
+      name: "p2_report",
+      projectId: "p2",
+      table: "p2_report",
+      format: "csv",
+      rowCount: 1,
+      csvPath: "/tmp/p2.csv",
+    });
+
+    // Another project's endpoints never leak into this project's Serve page.
+    expect((await listServedTables(s, "p1")).map((t) => t.name)).toEqual(["p1_report"]);
+    expect((await listServedTables(s, "p2")).map((t) => t.name)).toEqual(["p2_report"]);
+    expect(await listServedTables(s, "never-published")).toEqual([]);
   });
 
   it("binds the name as a parameter, storing an injection payload literally", async () => {

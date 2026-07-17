@@ -477,6 +477,95 @@ export async function resolveRunApproval(
 }
 
 /**
+ * A published table in the served registry (FR10), mirroring the backend `ServedTableSchema`.
+ * `name` is the identity — it is the URL segment the generated endpoints are reached at — and
+ * `endpoint`/`csvEndpoint` are the ready-to-use URLs the backend derives, so the UI renders them
+ * rather than rebuilding them from a route prefix it would have to keep in sync.
+ */
+export interface ServedTable {
+  name: string;
+  projectId: string;
+  runId: string | null;
+  schema: string;
+  table: string;
+  qualifiedTable: string;
+  format: string;
+  rowCount: number;
+  csvPath: string;
+  endpoint: string;
+  csvEndpoint: string;
+  publishedAt: string;
+}
+
+/** A served table's column, mirroring the backend `ServedColumnSchema`. */
+export interface ServedColumn {
+  name: string;
+  type: string;
+}
+
+/**
+ * One cell of served data, mirroring the backend `ServedCellSchema`. The backend coerces every
+ * warehouse value into one of these, so a `BIGINT` beyond JSON's safe-integer range arrives as a
+ * string rather than a silently rounded number.
+ */
+export type ServedCell = string | number | boolean | null;
+
+/**
+ * A page of a served table, mirroring the backend `ServedDataSchema` (FR10). `rowCount` is the
+ * **total** rows served, not `rows.length` — a client showing one page still learns how much
+ * there is. Row order is whatever the published export holds; the pipeline does not guarantee one.
+ */
+export interface ServedData {
+  name: string;
+  schema: string;
+  table: string;
+  qualifiedTable: string;
+  format: string;
+  endpoint: string;
+  csvEndpoint: string;
+  publishedAt: string;
+  columns: ServedColumn[];
+  rowCount: number;
+  rows: Record<string, ServedCell>[];
+  limit: number;
+  offset: number;
+}
+
+/**
+ * List the tables a project has published (FR10), newest first. The registry is keyed by served
+ * name while the wizard carries a project, so this is how the Serve step finds the endpoints a
+ * project's run generated. An empty list means the project has not published yet.
+ */
+export async function listServedTables(projectId: string): Promise<ServedTable[]> {
+  const res = await fetch(`/api/projects/${projectId}/served`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load served tables"));
+  }
+  const body = (await res.json()) as { served: ServedTable[] };
+  return body.served;
+}
+
+/**
+ * Read a page of a served table from its generated REST endpoint (FR10) — the same endpoint an
+ * external caller would hit, so the preview exercises the real contract rather than a private
+ * view of it. Serves the published export: the snapshot that passed DQ and was approved.
+ */
+export async function getServedData(
+  name: string,
+  options: { limit?: number; offset?: number } = {},
+): Promise<ServedData> {
+  const query = new URLSearchParams();
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.offset !== undefined) query.set("offset", String(options.offset));
+  const suffix = query.toString();
+  const res = await fetch(`/api/serve/${name}${suffix ? `?${suffix}` : ""}`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load served data"));
+  }
+  return (await res.json()) as ServedData;
+}
+
+/**
  * Subscribe to a run's progress events over SSE (FR9). Opens an `EventSource` on
  * `GET /api/runs/:runId/events` and invokes `onEvent` for every {@link RunEvent} the runner emits
  * (each arrives on a named channel matching its `kind`). Returns an unsubscribe function that
