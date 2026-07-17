@@ -35,6 +35,9 @@ export type WarehouseSchema = (typeof WAREHOUSE_SCHEMAS)[number];
  * Kept as the source of truth so the migration and its test agree on the set.
  */
 export const PLATFORM_TABLES = [
+  "sessions",
+  "messages",
+  "lineage",
   "projects",
   "sources",
   "runs",
@@ -57,6 +60,53 @@ export type PlatformTable = (typeof PLATFORM_TABLES)[number];
  */
 const MIGRATION_STATEMENTS: readonly string[] = [
   ...WAREHOUSE_SCHEMAS.map((s) => `CREATE SCHEMA IF NOT EXISTS ${s};`),
+
+  // FR1 — chat sessions (v2 agent model). Each row IS an embedded OpenCode session:
+  // its id is the OpenCode session id, so the sidebar lists sessions and reopening one
+  // restores its title/model. `title` is the human label; `model` is the per-session model
+  // ref (NULL → the platform default applies). `updated_at` bumps on each new turn so the
+  // sidebar can order by recent activity.
+  `CREATE TABLE IF NOT EXISTS platform.sessions (
+     id         VARCHAR PRIMARY KEY,
+     title      VARCHAR NOT NULL,
+     model      VARCHAR,
+     created_at TIMESTAMP NOT NULL DEFAULT now(),
+     updated_at TIMESTAMP NOT NULL DEFAULT now()
+   );`,
+
+  // FR1/FR2 — persisted chat history, one row per user/assistant message in a session.
+  // `seq` orders the transcript monotonically within a session so reopening replays it in
+  // order (wall-clock `created_at` can tie at sub-ms resolution). `role` is 'user' |
+  // 'assistant'; `content` is the message text. Streamed tool/approval detail is audited in
+  // `lineage`, keeping this table the plain conversational transcript.
+  `CREATE TABLE IF NOT EXISTS platform.messages (
+     id         VARCHAR PRIMARY KEY,
+     session_id VARCHAR NOT NULL,
+     seq        BIGINT NOT NULL,
+     role       VARCHAR NOT NULL,
+     content    VARCHAR NOT NULL,
+     created_at TIMESTAMP NOT NULL DEFAULT now()
+   );`,
+
+  // FR9/FR10/FR12 — the conversational agent's per-session lineage/audit log. One append-only
+  // row per auditable event the agent produced — a tool call, an approval decision, or a DQ
+  // result — discriminated by `kind` ('tool_call' | 'approval' | 'dq_result'). `run_id` groups
+  // the events of one build the agent orchestrated (NULL for ad-hoc events such as a bare
+  // query); `seq` orders events within a session; `tool`/`status` are set for tool_call and
+  // approval rows; `detail` carries the kind-specific JSON payload (args, exact SQL, check
+  // outcome). This is the v2 replacement for the removed deterministic runner's split
+  // run_tool_calls/dq_results/approvals — one session log the agent path (V4.4) writes.
+  `CREATE TABLE IF NOT EXISTS platform.lineage (
+     id         VARCHAR PRIMARY KEY,
+     session_id VARCHAR NOT NULL,
+     run_id     VARCHAR,
+     seq        BIGINT NOT NULL,
+     kind       VARCHAR NOT NULL,
+     tool       VARCHAR,
+     status     VARCHAR,
+     detail     VARCHAR,
+     created_at TIMESTAMP NOT NULL DEFAULT now()
+   );`,
 
   // FR1 — projects created by the wizard's first step.
   `CREATE TABLE IF NOT EXISTS platform.projects (
