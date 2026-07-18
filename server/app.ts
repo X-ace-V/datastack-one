@@ -35,15 +35,21 @@ import {
   readServedData,
 } from "./serving/reader.js";
 import { profileSource } from "./tools/profile.js";
+import { loadCsvRowCount } from "./tools/csv.js";
 import { listSourcesForSession } from "./tools/list-sources.js";
-import { getSessionSource } from "./store/session-sources.js";
+import { getSessionSource, registerSessionSource } from "./store/session-sources.js";
+import {
+  sourceNameFromFilename,
+  toSessionSourceView,
+} from "./core/session-sources.js";
+import { getSession } from "./store/sessions.js";
 import {
   ListSourcesRequestSchema,
   ProfileSourceRequestSchema,
 } from "./core/tool-io.js";
 import { DEFAULT_ARTIFACTS_DIR, writeArtifact } from "./tools/rules.js";
 import { getLatestArtifactByKind } from "./store/artifacts.js";
-import { DEFAULT_UPLOADS_DIR, saveUpload } from "./store/uploads.js";
+import { DEFAULT_UPLOADS_DIR, saveUpload, saveSessionUpload } from "./store/uploads.js";
 import {
   ApprovalReplyError,
   UnknownApprovalError,
@@ -306,6 +312,80 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         }
         throw err;
       }
+    },
+  );
+
+  // FR4 (V3.2): upload a CSV into a chat session. The raw file lands under
+  // `data/uploads/<sessionId>/` and is registered in `platform.session_sources` under a name
+  // derived from the filename, so the agent's `list_sources`/`profile_source` tools see it — the
+  // agent addresses it by that name; the on-disk path is resolved backend-side and never handed
+  // to the model (FR5b). The CSV is loaded in DuckDB once here so the row count is known
+  // immediately and a file DuckDB cannot read is rejected up front. Registering re-uses the
+  // (session_id, name) upsert, so re-uploading the same filename replaces the source in place.
+  // Status map: 503 unwired store, 400 non-multipart/missing/non-csv/empty/oversize, 404 unknown
+  // session, 422 unreadable CSV, 201 the registered source (path withheld).
+  app.post<{ Params: { id: string } }>(
+    "/api/sessions/:id/sources",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "session source store unavailable" });
+      }
+      if (!req.isMultipart()) {
+        return reply.code(400).send({ error: "expected a multipart/form-data upload" });
+      }
+
+      const session = await getSession(deps.store, req.params.id);
+      if (!session) {
+        return reply.code(404).send({ error: "session not found" });
+      }
+
+      const data = await req.file();
+      if (!data) {
+        return reply.code(400).send({ error: "a CSV file is required" });
+      }
+      if (!isCsvFilename(data.filename)) {
+        return reply.code(400).send({ error: "only .csv files are supported" });
+      }
+
+      let content: Buffer;
+      try {
+        content = await data.toBuffer();
+      } catch {
+        // @fastify/multipart throws once the byte stream exceeds the configured limit.
+        return reply
+          .code(400)
+          .send({ error: "the uploaded file exceeds the size limit" });
+      }
+      if (content.length === 0) {
+        return reply.code(400).send({ error: "the uploaded file is empty" });
+      }
+
+      const sourceId = randomUUID();
+      const path = await saveSessionUpload({
+        dir: uploadsDir,
+        sessionId: session.id,
+        sourceId,
+        originalFilename: data.filename,
+        content,
+      });
+
+      // Confirm the file is genuinely loadable in DuckDB and capture its row count, so
+      // `list_sources` shows a count at once and an unreadable file fails here, not later.
+      let rowCount: number;
+      try {
+        rowCount = await loadCsvRowCount(deps.store, path);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(422).send({ error: `could not load CSV: ${message}` });
+      }
+
+      const source = await registerSessionSource(deps.store, {
+        sessionId: session.id,
+        name: sourceNameFromFilename(data.filename),
+        path,
+        rowCount,
+      });
+      return reply.code(201).send({ source: toSessionSourceView(source) });
     },
   );
 

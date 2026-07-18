@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   ListedSourceSchema,
   SessionSourceSchema,
+  SessionSourceViewSchema,
+  sourceNameFromFilename,
   toListedSource,
+  toSessionSourceView,
   type SessionSource,
 } from "./session-sources.js";
 
@@ -46,5 +49,42 @@ describe("session-source contract", () => {
 
   it("carries a null row count through the projection", () => {
     expect(toListedSource({ ...source, rowCount: null }).rowCount).toBeNull();
+  });
+
+  it("toSessionSourceView keeps the persisted fields but withholds the path", () => {
+    const view = toSessionSourceView(source);
+    expect(view).toEqual({
+      sessionId: "ses_1",
+      name: "loans",
+      kind: "csv",
+      rowCount: 24,
+      createdAt: "2026-07-18 00:00:00",
+    });
+    expect(view).not.toHaveProperty("path");
+    expect(SessionSourceViewSchema.parse(view)).toEqual(view);
+  });
+});
+
+describe("sourceNameFromFilename", () => {
+  it("drops the directory and the .csv extension", () => {
+    expect(sourceNameFromFilename("loans.csv")).toBe("loans");
+    expect(sourceNameFromFilename("data/uploads/loans.csv")).toBe("loans");
+    expect(sourceNameFromFilename("C:\\tmp\\loans.CSV")).toBe("loans");
+  });
+
+  it("collapses unsafe characters into single underscores and trims them", () => {
+    expect(sourceNameFromFilename("Q1 loan book (final).csv")).toBe("Q1_loan_book_final");
+    expect(sourceNameFromFilename("--weird--.csv")).toBe("weird");
+    expect(sourceNameFromFilename("branch.report.csv")).toBe("branch_report");
+  });
+
+  it("is an injection-free token — no quotes, spaces, or path separators survive", () => {
+    const name = sourceNameFromFilename('loans"; DROP TABLE x; --.csv');
+    expect(name).toMatch(/^[A-Za-z0-9_]+$/);
+  });
+
+  it("falls back to 'source' when nothing usable remains", () => {
+    expect(sourceNameFromFilename(".csv")).toBe("source");
+    expect(sourceNameFromFilename("***.csv")).toBe("source");
   });
 });

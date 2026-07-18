@@ -40,3 +40,43 @@ export type ListedSource = z.infer<typeof ListedSourceSchema>;
 export function toListedSource(source: SessionSource): ListedSource {
   return { name: source.name, kind: source.kind, rowCount: source.rowCount };
 }
+
+/**
+ * The upload-route view of a session source (V3.2): the persisted fields minus the backend-only
+ * `path`. The upload API returns this to the browser — a trusted client, but the path is still
+ * withheld so the on-disk location never leaves the backend needlessly. (The model boundary is
+ * even tighter — it sees only {@link ListedSource} via `list_sources`.)
+ */
+export const SessionSourceViewSchema = z.object({
+  sessionId: z.string().min(1),
+  name: z.string().min(1),
+  kind: z.string().min(1),
+  rowCount: z.number().int().nonnegative().nullable(),
+  createdAt: z.string().min(1),
+});
+export type SessionSourceView = z.infer<typeof SessionSourceViewSchema>;
+
+/** Project a persisted {@link SessionSource} to its path-free {@link SessionSourceView}. */
+export function toSessionSourceView(source: SessionSource): SessionSourceView {
+  return {
+    sessionId: source.sessionId,
+    name: source.name,
+    kind: source.kind,
+    rowCount: source.rowCount,
+    createdAt: source.createdAt,
+  };
+}
+
+/**
+ * Derive a source name from an uploaded filename (V3.2). Drops any directory components and the
+ * trailing `.csv`, replaces every run of characters outside `[A-Za-z0-9_]` with a single `_`,
+ * and trims leading/trailing underscores. The agent addresses the source by this name and V3.3's
+ * `run_query` uses it as a DuckDB identifier, so it must be a clean, injection-free token; when
+ * nothing usable survives (e.g. a name of only punctuation) it falls back to `source`.
+ */
+export function sourceNameFromFilename(filename: string): string {
+  const base = filename.split(/[\\/]/).pop() ?? "";
+  const stem = base.replace(/\.csv$/i, "");
+  const cleaned = stem.replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  return cleaned.length > 0 ? cleaned : "source";
+}

@@ -37,3 +37,31 @@ export async function saveUpload(input: SaveUploadInput): Promise<string> {
   await writeFile(path, input.content);
   return path;
 }
+
+export interface SaveSessionUploadInput {
+  /** Upload root (e.g. `data/uploads`). */
+  dir: string;
+  /** Owning chat-session id — files are grouped into a per-session subdirectory. */
+  sessionId: string;
+  /** Source id, prefixed onto the filename so repeat uploads never collide. */
+  sourceId: string;
+  /** Client-supplied filename; sanitized to a safe basename before use. */
+  originalFilename: string;
+  /** The raw file bytes. */
+  content: Buffer;
+}
+
+/**
+ * Session-scoped sibling of {@link saveUpload} for the conversational agent (PRD FR4, V3.2):
+ * writes an uploaded CSV to `<dir>/<sessionId>/<sourceId>-<safeName>`, creating the parent
+ * directory as needed, and returns the path written. Grouping by session (not project) keeps a
+ * session's data together; the filename is sanitized ({@link safeUploadFilename}) so a malicious
+ * `../` name cannot escape the upload root.
+ */
+export async function saveSessionUpload(input: SaveSessionUploadInput): Promise<string> {
+  const name = `${input.sourceId}-${safeUploadFilename(input.originalFilename)}`;
+  const path = join(input.dir, input.sessionId, name);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, input.content);
+  return path;
+}
