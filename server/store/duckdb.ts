@@ -39,6 +39,7 @@ export const PLATFORM_TABLES = [
   "messages",
   "lineage",
   "session_sources",
+  "connections",
   "projects",
   "sources",
   "runs",
@@ -123,6 +124,20 @@ const MIGRATION_STATEMENTS: readonly string[] = [
      row_count  BIGINT,
      created_at TIMESTAMP NOT NULL DEFAULT now(),
      PRIMARY KEY (session_id, name)
+   );`,
+
+  // FR5 — registered database connections (Settings → Connections). One row per named Postgres
+  // (Neon) connection the user added. Keyed by `name` (a registry, not a log): the name is the
+  // agent-facing handle and the future `ATTACH … AS <name>` alias, so exactly one URL answers a
+  // name and re-adding a name replaces the row. `url` is the SECRET — it lives ONLY in this
+  // gitignored warehouse file, is bound in as a parameter, and is never selected into any API
+  // response (reads that feed the client omit it); the backend resolves name → url only to test
+  // or ATTACH the database (FR5b). See ARCHITECTURE §3.7.
+  `CREATE TABLE IF NOT EXISTS platform.connections (
+     name       VARCHAR PRIMARY KEY,
+     type       VARCHAR NOT NULL DEFAULT 'postgres',
+     url        VARCHAR NOT NULL,
+     created_at TIMESTAMP NOT NULL DEFAULT now()
    );`,
 
   // FR1 — projects created by the wizard's first step.

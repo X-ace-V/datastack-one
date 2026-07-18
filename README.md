@@ -91,6 +91,9 @@ conversational shell also needs are not built yet.
 | `POST /api/sessions/:id/chat` · `POST /api/sessions/:id/cancel` | Send an NL turn / cancel the in-flight turn (FR2). |
 | `POST /api/sessions/:id/sources` | Upload a CSV into a session → loaded in DuckDB + registered so the agent tools see it (FR4). |
 | `GET /api/events` | SSE chat stream: per-session routing + `?lastSeq` replay (FR3). |
+| `POST /api/connections` · `GET /api/connections` | Register / list database connections by name; the URL is entered only here and the list never returns a secret (FR5). |
+| `DELETE /api/connections/:name` | Remove a registered connection (FR5). |
+| `POST /api/connections/:name/test` | Probe a registered connection read-only; returns `{ok, error}` with the credential scrubbed (FR5). |
 | `POST /api/projects` · `GET /api/projects` | Create / list projects. |
 | `POST /api/projects/:id/source` · `GET /api/projects/:id/sources` | Upload / list CSV sources (FR4). |
 | `POST /api/projects/:id/profile` | Profile a source (FR6). |

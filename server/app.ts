@@ -50,6 +50,14 @@ import {
   toSessionSourceView,
 } from "./core/session-sources.js";
 import { getSession } from "./store/sessions.js";
+import { CreateConnectionRequestSchema, toConnectionView } from "./core/connections.js";
+import {
+  addConnection,
+  deleteConnection,
+  getStoredConnection,
+  listConnections,
+} from "./store/connections.js";
+import type { ConnectionTester } from "./connections/postgres.js";
 import { listSessionLineage, recordLineageEvent } from "./store/session-lineage.js";
 import type { LineageStatus } from "./core/session-lineage.js";
 import {
@@ -113,6 +121,13 @@ export interface ServerDeps {
    * 503, since a health-only boot has no warehouse to persist to.
    */
   store?: WarehouseStore;
+  /**
+   * Probes whether a registered connection URL is reachable, backing
+   * `POST /api/connections/:name/test` (FR5). Injected so route tests supply a deterministic,
+   * offline stub while the real boot wires the DuckDB Postgres attach probe. Absent → the
+   * test-connection route reports 503 (add/list/delete still work off the store alone).
+   */
+  testConnection?: ConnectionTester;
   /**
    * SessionManager backing the chat-session routes (FR1). It orchestrates the OpenCode
    * runtime and the `platform` store, so a health-only boot (no runtime) leaves it absent
@@ -501,6 +516,72 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     req.raw.on("close", unsubscribe);
     return reply;
   });
+
+  // FR5: register a database connection (Settings → Connections). This is the ONLY route a
+  // credentialed URL is entered on. The body is validated (a bad name or a non-postgres URL is a
+  // 400); the URL is bound as a parameter and persisted in the gitignored warehouse. The 201
+  // response carries the secret-free VIEW (name/type/createdAt) — the url is never echoed back.
+  // Status map: 503 unwired, 400 bad body, 201 the registered connection.
+  app.post("/api/connections", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "connection store unavailable" });
+    }
+
+    const parsed = CreateConnectionRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid connection", details: parsed.error.issues });
+    }
+
+    const stored = await addConnection(deps.store, parsed.data);
+    return reply.code(201).send({ connection: toConnectionView(stored) });
+  });
+
+  // FR5: list registered connections. Returns only the secret-free views (name/type/createdAt);
+  // the store read never selects the url, so this response cannot carry a credential. Status
+  // map: 503 unwired, 200 the connections.
+  app.get("/api/connections", async (_req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "connection store unavailable" });
+    }
+    return reply.code(200).send({ connections: await listConnections(deps.store) });
+  });
+
+  // FR5: delete a registered connection by name. Status map: 503 unwired, 404 unknown name,
+  // 204 deleted.
+  app.delete<{ Params: { name: string } }>(
+    "/api/connections/:name",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "connection store unavailable" });
+      }
+      const existed = await deleteConnection(deps.store, req.params.name);
+      if (!existed) {
+        return reply.code(404).send({ error: "connection not found" });
+      }
+      return reply.code(204).send();
+    },
+  );
+
+  // FR5: test a registered connection. The backend resolves name → the stored (secret) URL and
+  // probes it read-only; the response carries only {ok, error} with any credential scrubbed from
+  // the failure message — the URL never leaves the backend. Status map: 503 unwired (no store or
+  // no tester), 404 unknown name, 200 the probe result (ok true or false).
+  app.post<{ Params: { name: string } }>(
+    "/api/connections/:name/test",
+    async (req, reply) => {
+      if (!deps.store || !deps.testConnection) {
+        return reply.code(503).send({ error: "connection tester unavailable" });
+      }
+      const stored = await getStoredConnection(deps.store, req.params.name);
+      if (!stored) {
+        return reply.code(404).send({ error: "connection not found" });
+      }
+      const result = await deps.testConnection(stored.url, stored.type);
+      return reply.code(200).send({ result });
+    },
+  );
 
   // FR1: create a project. The body is validated against the shared contract (400 on a bad
   // request); on success the persisted row — with its server-generated id, applied warehouse

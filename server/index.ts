@@ -7,6 +7,7 @@ import { createApprovalGate } from "./opencode/approvals.js";
 import { createToolApprovalGate } from "./opencode/tool-approvals.js";
 import { createSessionDqGate } from "./opencode/session-dq.js";
 import { SessionManager } from "./opencode/sessions.js";
+import { testConnection } from "./connections/postgres.js";
 
 /** Boot entrypoint: start the OpenCode runtime, then bind the HTTP server. */
 const PORT = Number(process.env.PORT ?? 3001);
@@ -53,6 +54,7 @@ async function main(): Promise<void> {
     store,
     sessions,
     events,
+    testConnection,
   });
 
   // Stop the bridge pump, then the spawned opencode process, then close the store, when the
