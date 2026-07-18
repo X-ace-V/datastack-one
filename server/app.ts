@@ -54,11 +54,15 @@ import {
   ListSourcesRequestSchema,
   ProfileSourceRequestSchema,
   RunQueryRequestSchema,
+  RunDqCheckRequestSchema,
   LandParquetRequestSchema,
   LoadWarehouseRequestSchema,
   RunTransformRequestSchema,
   PublishServingRequestSchema,
 } from "./core/tool-io.js";
+import { DqSpecSchema, DQ_TARGET_TABLE } from "./core/dq.js";
+import { runDqCheck } from "./tools/dq.js";
+import type { SessionDqGate } from "./opencode/session-dq.js";
 import { DEFAULT_ARTIFACTS_DIR, writeArtifact } from "./tools/rules.js";
 import { getLatestArtifactByKind } from "./store/artifacts.js";
 import { DEFAULT_UPLOADS_DIR, saveUpload, saveSessionUpload } from "./store/uploads.js";
@@ -95,6 +99,13 @@ export interface ServerDeps {
    * {@link ServerDeps.approvals}.
    */
   toolApprovals?: ToolApprovalGate;
+  /**
+   * Per-session data-quality gate (V4.3, FR9). `run_dq_check` records each run here and
+   * `publish_serving` consults it: a session whose most recent DQ run failed cannot publish.
+   * Absent → nothing records or blocks, so `run_dq_check` still runs but does not gate publish
+   * (a health-only boot with no runtime state).
+   */
+  dqGate?: SessionDqGate;
   /**
    * Metadata store backing the project routes (FR1). Absent → the project routes report
    * 503, since a health-only boot has no warehouse to persist to.
@@ -959,6 +970,50 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     return reply.code(200).send({ result });
   });
 
+  // `run_dq_check`: execute the agent-proposed data-quality checks against the loaded warehouse
+  // table and record the outcome on the per-session DQ gate (V4.3, FR9). Read-only — it only runs
+  // SELECT counts, so it needs no approval. The checks are assembled into a `DqSpec` (default
+  // target `raw.source`) and validated for the ≥3-checks / ≥3-distinct-types invariant here, so a
+  // degenerate set is a 422 the agent can act on. A **failing** run blocks a later publish for the
+  // session (the block is enforced in the publish route). Status map: 503 unwired store, 400 bad
+  // body, 422 a spec that fails the DQ contract, 200 with `{ result }` (pass or fail per check).
+  app.post("/api/internal/tools/run_dq_check", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    const parsed = RunDqCheckRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid run_dq_check request", details: parsed.error.issues });
+    }
+
+    // Assemble + validate the reviewable spec (≥3 checks covering ≥3 of the four types). A
+    // degenerate set (too few checks, no type coverage, a column-less not_null) fails here so the
+    // agent gets the specific reason rather than a silent, unhelpful pass.
+    const spec = DqSpecSchema.safeParse({
+      targetTable: parsed.data.targetTable ?? DQ_TARGET_TABLE,
+      checks: parsed.data.checks,
+    });
+    if (!spec.success) {
+      const summary = spec.error.issues
+        .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+        .join("; ");
+      return reply.code(422).send({ error: `invalid data-quality checks: ${summary}` });
+    }
+
+    let result;
+    try {
+      result = await runDqCheck(deps.store, { spec: spec.data });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(422).send({ error: `could not run data-quality checks: ${message}` });
+    }
+    // Record on the gate so a failing run blocks a later publish for this session (FR9).
+    deps.dqGate?.record(parsed.data.sessionID, result);
+    return reply.code(200).send({ result });
+  });
+
   // FR8/FR10 write tools. These are the backend half of the four approval-gated write tools.
   // OpenCode does not gate a custom plugin tool, so the pause is enforced HERE: each route opens
   // an inline approval on the tool gate and AWAITS a human's answer before it executes — nothing
@@ -1135,6 +1190,19 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       return reply
         .code(400)
         .send({ error: "invalid publish_serving request", details: parsed.error.issues });
+    }
+
+    // FR9: a failing DQ run blocks publish. Consult the gate BEFORE opening the approval — there
+    // is no point asking a human to approve a publish that must be refused. The refusal names the
+    // failed checks so the agent can tell the user what to fix and re-run `run_dq_check`.
+    if (deps.dqGate?.isPublishBlocked(parsed.data.sessionID)) {
+      const latest = deps.dqGate.latest(parsed.data.sessionID);
+      const failedChecks = (latest?.results ?? []).filter((r) => !r.passed).map((r) => r.name);
+      return reply.code(409).send({
+        error: "publish blocked: the most recent data-quality checks failed",
+        blocked: true,
+        failedChecks,
+      });
     }
 
     const servedName = parsed.data.name ?? parsed.data.table;

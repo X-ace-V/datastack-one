@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ListedSourceSchema } from "./session-sources.js";
 import { SourceProfileSchema } from "./profile.js";
 import { QueryResultSchema } from "./query.js";
+import { DqCheckSchema, DqRunResultSchema } from "./dq.js";
 
 /**
  * Pure request/response contracts for the internal loopback the agent tools call
@@ -59,6 +60,28 @@ export const RunQueryResponseSchema = z.object({
   result: QueryResultSchema,
 });
 export type RunQueryResponse = z.infer<typeof RunQueryResponseSchema>;
+
+/**
+ * `run_dq_check` request (V4.3, FR9): run the agent-proposed data-quality checks against the
+ * loaded warehouse table. Read-only (no approval), so it is not one of the write tools. The model
+ * supplies the `checks`; `targetTable` is optional and defaults server-side to the loaded source
+ * table ({@link file://./dq.ts} `DQ_TARGET_TABLE`). The route assembles these into a `DqSpec` and
+ * validates the ≥3-checks / ≥3-distinct-types invariant there, mapping a degenerate set to 422 so
+ * the agent gets actionable feedback. `checks` is kept loose here (min 1) so that "too few checks"
+ * surfaces as a DQ-schema violation with a clear message rather than a generic 400.
+ */
+export const RunDqCheckRequestSchema = z.object({
+  sessionID: z.string().min(1),
+  targetTable: z.string().min(1).optional(),
+  checks: z.array(DqCheckSchema).min(1),
+});
+export type RunDqCheckRequest = z.infer<typeof RunDqCheckRequestSchema>;
+
+/** `run_dq_check` response: the executed run's per-check results + the aggregate publish gate. */
+export const RunDqCheckResponseSchema = z.object({
+  result: DqRunResultSchema,
+});
+export type RunDqCheckResponse = z.infer<typeof RunDqCheckResponseSchema>;
 
 /**
  * Wire contracts for the **write** tools (PRD FR8/FR10). These are the four approval-gated

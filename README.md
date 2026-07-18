@@ -99,6 +99,7 @@ conversational shell also needs are not built yet.
 | `GET /api/projects/:id/served` | Endpoints this project has published. |
 | `GET /api/serve/:name` · `GET /api/serve/:name.csv` | The generated endpoint: JSON preview / CSV download (FR11). |
 | `POST /api/internal/tools/list_sources` · `POST /api/internal/tools/profile_source` · `POST /api/internal/tools/run_query` | Loopback the agent's read data-tools call; session-scoped, name-only (FR4/FR6/FR7). |
+| `POST /api/internal/tools/run_dq_check` | Loopback for the read-only DQ tool; runs the reviewed checks and a failing run blocks a later publish for the session (FR9). |
 | `POST /api/internal/tools/land_parquet` · `POST /api/internal/tools/load_warehouse` · `POST /api/internal/tools/run_transform` · `POST /api/internal/tools/publish_serving` | Loopback for the four approval-gated write tools; executed only after inline approval (FR8). |
 
 The `internal/tools/*` routes are the loopback the in-process OpenCode plugin

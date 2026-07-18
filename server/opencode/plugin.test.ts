@@ -10,6 +10,7 @@ import { buildServer } from "../app.js";
 import { openStore, type WarehouseStore } from "../store/duckdb.js";
 import { registerSessionSource } from "../store/session-sources.js";
 import { createToolApprovalGate, type ToolApprovalGate } from "./tool-approvals.js";
+import { createSessionDqGate, type SessionDqGate } from "./session-dq.js";
 import type { ApprovalAction, ApprovalRequest } from "../core/approvals.js";
 import type { NormalizedEvent } from "../core/events.js";
 
@@ -54,6 +55,7 @@ describe("data-tools plugin", () => {
     "list_sources",
     "profile_source",
     "run_query",
+    "run_dq_check",
     "land_parquet",
     "load_warehouse",
     "run_transform",
@@ -111,6 +113,7 @@ describe("data-tools plugin", () => {
     landingDir: string;
     servingDir: string;
     gate: ToolApprovalGate;
+    dqGate: SessionDqGate;
     emitted: NormalizedEvent[];
     setAnswer: (
       answer: ApprovalAction,
@@ -135,10 +138,11 @@ describe("data-tools plugin", () => {
         });
       }
     });
+    const dqGate = createSessionDqGate();
     const landingDir = await mkdtemp(join(tmpdir(), "plugin-land-"));
     const servingDir = await mkdtemp(join(tmpdir(), "plugin-serve-"));
     tmpDirs.push(landingDir, servingDir);
-    const app = buildServer({ store, landingDir, servingDir, toolApprovals: gate });
+    const app = buildServer({ store, landingDir, servingDir, toolApprovals: gate, dqGate });
     const address = await app.listen({ port: 0, host: "127.0.0.1" });
     process.env.DATASTACK_INTERNAL_URL = address;
     return {
@@ -146,6 +150,7 @@ describe("data-tools plugin", () => {
       landingDir,
       servingDir,
       gate,
+      dqGate,
       emitted,
       setAnswer: (a, op) => {
         answer = a;
@@ -162,6 +167,7 @@ describe("data-tools plugin", () => {
       "load_warehouse",
       "profile_source",
       "publish_serving",
+      "run_dq_check",
       "run_query",
       "run_transform",
     ]);
@@ -169,10 +175,13 @@ describe("data-tools plugin", () => {
     expect(tools.list_sources.description).toMatch(/list the data sources/i);
     expect(tools.profile_source.description).toMatch(/profile/i);
     expect(tools.run_query.description).toMatch(/read-only sql select/i);
+    expect(tools.run_dq_check.description).toMatch(/data-quality checks/i);
     // profile_source takes a `source` name; list_sources takes no args; run_query takes `sql`.
     expect(Object.keys(tools.profile_source.args)).toEqual(["source"]);
     expect(Object.keys(tools.list_sources.args)).toEqual([]);
     expect(Object.keys(tools.run_query.args)).toEqual(["sql"]);
+    // run_dq_check takes an optional target table and the reviewable checks.
+    expect(Object.keys(tools.run_dq_check.args).sort()).toEqual(["checks", "targetTable"]);
     // The four write tools carry their approval-gated args.
     expect(Object.keys(tools.land_parquet.args).sort()).toEqual(["ingestionDate", "source"]);
     expect(Object.keys(tools.load_warehouse.args).sort()).toEqual(["dataset", "schema", "table"]);
@@ -191,7 +200,7 @@ describe("data-tools plugin", () => {
       );
     }
     // The read tools are NOT gated, so they must not claim to pause.
-    for (const name of ["list_sources", "profile_source", "run_query"] as const) {
+    for (const name of ["list_sources", "profile_source", "run_query", "run_dq_check"] as const) {
       expect((ASK_TOOLS as readonly string[]).includes(name)).toBe(false);
     }
   });
@@ -401,6 +410,87 @@ describe("data-tools plugin", () => {
       // proving the tool did NOT run before approval.
       expect(await tableExists(store, "raw", "source")).toBe(false);
       expect(await tableExists(store, "marts", "x")).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  // FR9: run_dq_check surfaces pass/fail in the chat and a FAILING run blocks a later
+  // publish_serving for the session, via the real loopback + real DuckDB + the per-session gate.
+
+  /** Seed raw.source (one NULL balance) + a marts table to publish, as a build chain would. */
+  async function seedWarehouse(store: WarehouseStore): Promise<void> {
+    await store.run(
+      "CREATE OR REPLACE TABLE raw.source AS SELECT * FROM (VALUES " +
+        "(1, 'north', 1000.0, DATE '2024-01-01'), " +
+        "(2, 'south', NULL, DATE '2024-01-02')) AS t(loan_id, branch, balance, opened_at)",
+    );
+    await store.run(
+      "CREATE OR REPLACE TABLE marts.report AS " +
+        "SELECT branch, count(*)::BIGINT AS n FROM raw.source GROUP BY branch",
+    );
+  }
+
+  const DQ_PASS = [
+    { name: "has rows", type: "row_count" as const, column: null, description: "≥1 row" },
+    { name: "loan_id not null", type: "not_null" as const, column: "loan_id", description: "no NULLs" },
+    { name: "branch present", type: "schema" as const, column: "branch", description: "exists" },
+    { name: "opened_at fresh", type: "freshness" as const, column: "opened_at", description: "non-null" },
+  ];
+  const DQ_FAIL = [
+    { name: "has rows", type: "row_count" as const, column: null, description: "≥1 row" },
+    { name: "balance not null", type: "not_null" as const, column: "balance", description: "no NULLs" },
+    { name: "branch present", type: "schema" as const, column: "branch", description: "exists" },
+    { name: "opened_at fresh", type: "freshness" as const, column: "opened_at", description: "non-null" },
+  ];
+
+  it("run_dq_check passing lets publish_serving proceed (FR9)", async () => {
+    const { store, dqGate, close } = await backend();
+    try {
+      await seedWarehouse(store);
+      const { run_dq_check, publish_serving } = await instantiate();
+
+      const dqRes = await run_dq_check.execute({ checks: DQ_PASS }, ctx("ses_ok"));
+      const dq = dqRes as { output: string; metadata: { dq: { passed: boolean } } };
+      expect(dq.metadata.dq.passed).toBe(true);
+      expect(dq.output).toContain("PASSED");
+      expect(dqGate.isPublishBlocked("ses_ok")).toBe(false);
+
+      const pubRes = await publish_serving.execute({ table: "report" }, ctx("ses_ok"));
+      const pub = pubRes as unknown as { metadata: { publish: { name: string } } };
+      expect(pub.metadata.publish.name).toBe("report");
+    } finally {
+      await close();
+    }
+  });
+
+  it("run_dq_check failing blocks publish_serving and the tool reports it (FR9)", async () => {
+    const { store, dqGate, emitted, close } = await backend();
+    try {
+      await seedWarehouse(store);
+      const { run_dq_check, publish_serving } = await instantiate();
+
+      // The failing check surfaces in the chat as a FAILED report noting the publish is blocked.
+      const dqRes = await run_dq_check.execute({ checks: DQ_FAIL }, ctx("ses_bad"));
+      const dq = dqRes as { output: string; metadata: { dq: { passed: boolean } } };
+      expect(dq.metadata.dq.passed).toBe(false);
+      expect(dq.output).toContain("FAILED");
+      expect(dq.output).toMatch(/blocked/i);
+      expect(dqGate.isPublishBlocked("ses_bad")).toBe(true);
+
+      // publish_serving is refused and says so, naming the failed check — and opens NO approval.
+      const pubRes = await publish_serving.execute({ table: "report" }, ctx("ses_bad"));
+      expect(typeof pubRes).toBe("string");
+      expect(pubRes as string).toMatch(/was blocked/);
+      expect(pubRes as string).toContain("balance not null");
+      expect(emitted.filter((e) => e.kind === "approval")).toHaveLength(0);
+
+      // Nothing was registered — the DQ-failed data never reached the serving registry.
+      const registered = await store.all(
+        "SELECT 1 FROM platform.served_tables WHERE name = $1",
+        ["report"],
+      );
+      expect(registered).toHaveLength(0);
     } finally {
       await close();
     }

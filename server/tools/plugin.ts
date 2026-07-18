@@ -154,6 +154,44 @@ function formatProfile(source: string, profile: SourceProfile): string {
   return lines.join("\n");
 }
 
+/** One executed data-quality check's outcome, as `run_dq_check` returns it. */
+interface DqCheckResult {
+  name: string;
+  type: string;
+  column: string | null;
+  passed: boolean;
+  detail: string;
+}
+
+/** The result of a whole `run_dq_check` run: per-check outcomes + the aggregate publish gate. */
+interface DqRunResult {
+  targetTable: string;
+  results: DqCheckResult[];
+  passed: boolean;
+}
+
+/** Render a DQ run as a compact, model-readable pass/fail report. */
+function formatDqResult(result: DqRunResult): string {
+  const passedCount = result.results.filter((r) => r.passed).length;
+  const lines = [
+    `${result.passed ? "PASSED" : "FAILED"} — ${passedCount}/${result.results.length} ` +
+      `check${result.results.length === 1 ? "" : "s"} passed on ${result.targetTable}.`,
+    "",
+    ...result.results.map(
+      (r) =>
+        `  ${r.passed ? "✓" : "✗"} ${r.name} (${r.type}${r.column ? ` on ${r.column}` : ""}) — ${r.detail}`,
+    ),
+  ];
+  if (!result.passed) {
+    lines.push(
+      "",
+      "One or more checks failed, so publish_serving is BLOCKED for this session until a later " +
+        "run passes. Fix the data (or the checks) and re-run run_dq_check.",
+    );
+  }
+  return lines.join("\n");
+}
+
 /** What `land_parquet` returns once a landed dataset persists. */
 interface LandResult {
   dataset: string;
@@ -313,6 +351,64 @@ export const DatastackToolsPlugin: Plugin = async () => {
         },
       }),
 
+      run_dq_check: tool({
+        description:
+          "Run data-quality checks over a loaded warehouse table (default raw.source) and report " +
+          "pass/fail per check. Provide AT LEAST 3 checks covering at least 3 of the four types: " +
+          "row_count (table has rows; column=null), not_null (a key column has no NULLs), schema " +
+          "(a column is present), freshness (a date column is non-null). Read-only; needs no " +
+          "approval. IMPORTANT: if any check FAILS, publish_serving is blocked for this session " +
+          "until a later run passes — run this before publishing.",
+        args: {
+          targetTable: z
+            .string()
+            .optional()
+            .describe("The loaded table to check. Defaults to raw.source (the loaded source)."),
+          checks: z
+            .array(
+              z.object({
+                name: z.string().describe("Short check name, e.g. 'loan_id not null'."),
+                type: z
+                  .enum(["row_count", "not_null", "schema", "freshness"])
+                  .describe("Which kind of assertion this check makes."),
+                column: z
+                  .string()
+                  .nullable()
+                  .describe("The column checked; null for a table-level row_count check."),
+                description: z
+                  .string()
+                  .describe("Plain-English statement of what the check asserts."),
+              }),
+            )
+            .describe("At least 3 checks, covering at least 3 of the four types."),
+        },
+        async execute(args, context) {
+          const { ok, status, body } = await callBackend("/api/internal/tools/run_dq_check", {
+            sessionID: context.sessionID,
+            ...(args.targetTable ? { targetTable: args.targetTable } : {}),
+            checks: args.checks,
+          });
+          if (status === 422) {
+            const detail = (body as { error?: string })?.error ?? "the checks were invalid";
+            return `run_dq_check failed: ${detail}. Provide ≥3 checks covering ≥3 of the four types.`;
+          }
+          if (!ok) {
+            return `Failed to run data-quality checks (status ${status}).`;
+          }
+          const result = (body as { result?: DqRunResult })?.result;
+          if (!result) {
+            return "The data-quality run returned no result.";
+          }
+          return {
+            title: result.passed
+              ? `DQ passed (${result.results.length} checks)`
+              : "DQ failed — publish blocked",
+            output: formatDqResult(result),
+            metadata: { dq: result },
+          };
+        },
+      }),
+
       land_parquet: tool({
         description:
           "Land a connected source to Parquet in the data lake, partitioned by ingestion date. " +
@@ -468,6 +564,14 @@ export const DatastackToolsPlugin: Plugin = async () => {
             },
           );
           if (denied) return deniedMessage("publish_serving");
+          if (status === 409) {
+            const failed = (body as { failedChecks?: string[] })?.failedChecks ?? [];
+            const which = failed.length > 0 ? ` (${failed.join(", ")})` : "";
+            return (
+              `publish_serving was blocked: the most recent data-quality checks failed${which}. ` +
+              "Fix the data and re-run run_dq_check until all checks pass before publishing."
+            );
+          }
           if (status === 422) {
             const detail = (body as { error?: string })?.error ?? "the table could not be published";
             return `publish_serving failed: ${detail}. Make sure the marts table exists.`;

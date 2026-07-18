@@ -5,6 +5,7 @@ import { createEventBridge } from "./opencode/bridge.js";
 import { createEventHub } from "./opencode/hub.js";
 import { createApprovalGate } from "./opencode/approvals.js";
 import { createToolApprovalGate } from "./opencode/tool-approvals.js";
+import { createSessionDqGate } from "./opencode/session-dq.js";
 import { SessionManager } from "./opencode/sessions.js";
 
 /** Boot entrypoint: start the OpenCode runtime, then bind the HTTP server. */
@@ -38,6 +39,9 @@ async function main(): Promise<void> {
   // write route pauses on this gate before executing. It surfaces each pending approval inline by
   // publishing onto the same SSE stream, so the chat's approval pill renders it.
   const toolApprovals = createToolApprovalGate((event) => events.publish(event));
+  // The per-session DQ gate (FR9): `run_dq_check` records each run here and `publish_serving`
+  // refuses to publish for a session whose most recent DQ run failed, until it passes again.
+  const dqGate = createSessionDqGate();
   // Orchestrate chat sessions over the runtime + store (FR1) so the session routes can
   // create/list/get/rename/delete conversations.
   const sessions = new SessionManager(runtime.client, store);
@@ -45,6 +49,7 @@ async function main(): Promise<void> {
     opencode: runtime.client,
     approvals,
     toolApprovals,
+    dqGate,
     store,
     sessions,
     events,
