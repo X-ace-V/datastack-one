@@ -219,6 +219,36 @@ export async function deleteSession(id: string): Promise<void> {
   }
 }
 
+/**
+ * Send a natural-language turn to a session (FR2). The backend persists the user turn and fires
+ * it at the agent, returning fast (202) with the persisted user message; the assistant's
+ * reasoning, tool calls, and reply stream back over the SSE event stream, not this response.
+ * An optional `model` overrides the model for this single turn.
+ */
+export async function sendChat(
+  sessionId: string,
+  text: string,
+  model?: string,
+): Promise<Message> {
+  const res = await fetch(`/api/sessions/${sessionId}/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(model ? { text, model } : { text }),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to send message"));
+  }
+  return (await res.json()) as Message;
+}
+
+/** Cancel the in-flight turn on a session (FR2) via `session.abort`. Resolves on the 200. */
+export async function cancelChat(sessionId: string): Promise<void> {
+  const res = await fetch(`/api/sessions/${sessionId}/cancel`, { method: "POST" });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to cancel turn"));
+  }
+}
+
 /** List all projects, newest first. */
 export async function listProjects(): Promise<Project[]> {
   const res = await fetch("/api/projects");

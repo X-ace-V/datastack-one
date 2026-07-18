@@ -1,18 +1,54 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { App } from "./App";
 
 /**
- * V0.2 — the three-pane agent shell. Asserts the layout renders its three landmark regions
- * (session sidebar · chat · data panel) as accessibly-named landmarks, so the shell is the
- * conversational frame the PRD v2 describes rather than the removed wizard. The chat and data
- * panel are placeholders at this task; the sidebar (V2.3) is now the real component, so `fetch`
- * is stubbed to the empty `GET /api/sessions` contract to keep these landmark assertions
- * deterministic (the sidebar's own behaviour is covered by Sidebar.test.tsx).
+ * V0.2/V2.4 — the three-pane agent shell, now wired to the live-state store and SSE stream.
+ * The first block asserts the layout still renders its three landmark regions (session sidebar ·
+ * chat · data panel). The second drives the full V2.4 chat path end to end: select a session,
+ * send a prompt, and stream an assistant text frame back through the REAL useEvents → store →
+ * ChatStream → MessageBubble pipeline (only the network transports — fetch + EventSource — are
+ * faked, exactly the V2.2/V2.3 boundary).
  */
+
+/** A minimal EventSource stand-in: jsdom has none, and useEvents opens one on mount. */
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  url: string;
+  listeners = new Map<string, ((e: unknown) => void)[]>();
+  readyState = 0;
+  constructor(url: string) {
+    this.url = url;
+    FakeEventSource.instances.push(this);
+  }
+  addEventListener(type: string, cb: (e: unknown) => void) {
+    const list = this.listeners.get(type) ?? [];
+    list.push(cb);
+    this.listeners.set(type, list);
+  }
+  removeEventListener() {}
+  close() {
+    this.readyState = 2;
+  }
+  /** Deliver one framed event on a named channel, as the SSE route would. */
+  emit(channel: string, data: unknown, seq: number) {
+    const frame = { data: JSON.stringify(data), lastEventId: String(seq) };
+    for (const cb of this.listeners.get(channel) ?? []) cb(frame);
+  }
+}
+
 describe("App shell", () => {
   beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -60,5 +96,73 @@ describe("App shell", () => {
     expect(nav?.parentElement).toBe(shell);
     expect(main?.parentElement).toBe(shell);
     expect(aside?.parentElement).toBe(shell);
+  });
+});
+
+describe("App chat flow (V2.4)", () => {
+  const SESSION = {
+    id: "ses_1",
+    title: "Loan review",
+    model: "opencode/big-pickle" as string | null,
+    createdAt: "2026-07-17T10:00:00Z",
+    updatedAt: "2026-07-17T10:00:00Z",
+  };
+
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST") return { ok: true, status: 202, json: async () => ({ id: "u1" }) };
+        return { ok: true, status: 200, json: async () => ({ sessions: [SESSION] }) };
+      }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("selects a session, sends a prompt, and streams the assistant reply into a bubble", async () => {
+    render(<App />);
+
+    // The sidebar lists the session; before selection the chat pane shows its placeholder.
+    const sessionButton = await screen.findByRole("button", { name: "Loan review" });
+    expect(screen.getByText(/start a session to chat/i)).toBeTruthy();
+
+    // Selecting the session mounts the composer.
+    await act(async () => {
+      fireEvent.click(sessionButton);
+    });
+    const box = await screen.findByLabelText("Message the agent");
+
+    // Send a prompt — the optimistic user bubble appears immediately.
+    fireEvent.change(box, { target: { value: "how many branches?" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    expect(screen.getByText("how many branches?")).toBeTruthy();
+
+    // Stream an assistant text frame back through the real SSE → store pipeline.
+    const es = FakeEventSource.instances[0];
+    expect(es).toBeTruthy();
+    await act(async () => {
+      es!.emit(
+        "text",
+        {
+          kind: "text",
+          sessionID: "ses_1",
+          messageID: "asst_1",
+          partID: "p1",
+          text: "There are 4 branches.",
+        },
+        1,
+      );
+    });
+
+    await waitFor(() => expect(screen.getByText("There are 4 branches.")).toBeTruthy());
   });
 });
