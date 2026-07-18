@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import multipart from "@fastify/multipart";
 import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
@@ -38,6 +39,11 @@ import { profileSource } from "./tools/profile.js";
 import { loadCsvRowCount } from "./tools/csv.js";
 import { listSourcesForSession } from "./tools/list-sources.js";
 import { runQuery } from "./tools/query.js";
+import { DEFAULT_LANDING_DIR, landParquet } from "./tools/land.js";
+import { loadWarehouse } from "./tools/warehouse.js";
+import { runTransform } from "./tools/transform.js";
+import { DEFAULT_SERVING_DIR, publishServing } from "./tools/serve.js";
+import { safeDatasetName } from "./core/landing.js";
 import { getSessionSource, registerSessionSource } from "./store/session-sources.js";
 import {
   sourceNameFromFilename,
@@ -48,6 +54,10 @@ import {
   ListSourcesRequestSchema,
   ProfileSourceRequestSchema,
   RunQueryRequestSchema,
+  LandParquetRequestSchema,
+  LoadWarehouseRequestSchema,
+  RunTransformRequestSchema,
+  PublishServingRequestSchema,
 } from "./core/tool-io.js";
 import { DEFAULT_ARTIFACTS_DIR, writeArtifact } from "./tools/rules.js";
 import { getLatestArtifactByKind } from "./store/artifacts.js";
@@ -57,6 +67,7 @@ import {
   UnknownApprovalError,
   type ApprovalGate,
 } from "./opencode/approvals.js";
+import type { ToolApprovalGate } from "./opencode/tool-approvals.js";
 import type { EventHub } from "./opencode/hub.js";
 import { SessionManager, SessionRuntimeError } from "./opencode/sessions.js";
 
@@ -73,10 +84,17 @@ export interface ServerDeps {
   /** OpenCode client slice used by `GET /api/models`. Absent → the route reports 503. */
   opencode?: ModelsClient;
   /**
-   * Approval gate holding pending permission requests (FR10). Absent → the approvals route
-   * reports 503, since a health-only boot has no runtime to approve against.
+   * Approval gate holding pending OpenCode permission requests for built-in surfaces
+   * (bash/edit/webfetch) (FR10). Absent → the approvals route falls back to the tool gate.
    */
   approvals?: ApprovalGate;
+  /**
+   * Approval gate for the custom write tools (V4.1, FR8/FR10). OpenCode does not gate plugin
+   * tools, so each write route pauses on this gate before executing. Absent → the write routes
+   * report 503 (a write cannot run without a gate) and the approvals route falls back to
+   * {@link ServerDeps.approvals}.
+   */
+  toolApprovals?: ToolApprovalGate;
   /**
    * Metadata store backing the project routes (FR1). Absent → the project routes report
    * 503, since a health-only boot has no warehouse to persist to.
@@ -104,6 +122,16 @@ export interface ServerDeps {
    * they never touch the repo's `data/`.
    */
   artifactsDir?: string;
+  /**
+   * Root the `land_parquet` write tool lands Parquet under (FR8). Namespaced per session.
+   * Defaults to {@link DEFAULT_LANDING_DIR}; tests override it with a tmp dir.
+   */
+  landingDir?: string;
+  /**
+   * Root the `publish_serving` write tool exports CSV under (FR8/FR11). Namespaced per session.
+   * Defaults to {@link DEFAULT_SERVING_DIR}; tests override it with a tmp dir.
+   */
+  servingDir?: string;
 }
 
 /** Hard cap on an uploaded CSV, keeping a stray huge file from filling the disk. */
@@ -118,6 +146,8 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   const app = Fastify({ logger: false });
   const uploadsDir = deps.uploadsDir ?? DEFAULT_UPLOADS_DIR;
   const artifactsDir = deps.artifactsDir ?? DEFAULT_ARTIFACTS_DIR;
+  const landingDir = deps.landingDir ?? DEFAULT_LANDING_DIR;
+  const servingDir = deps.servingDir ?? DEFAULT_SERVING_DIR;
 
   // FR2: accept CSV uploads as multipart/form-data. Registered for the whole app; only the
   // source-upload route reads a file, and the size cap guards the disk.
@@ -795,13 +825,16 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     }
   });
 
-  // FR8: resolve a pending permission request. The bridge captured it from the runtime's
-  // `permission.updated` event; here a human's approve/reject is relayed back so the gated
-  // tool either runs once or is aborted. This is the only path past the approval gate.
+  // FR8/FR10: resolve a pending approval — the single path a human's approve/reject reaches a
+  // paused write. A request is held by one of two gates: the write-tool gate (V4.1) for the
+  // custom data-eng tools, or the OpenCode permission gate for built-in surfaces (bash/edit/
+  // webfetch). We try the tool gate first (it owns the write path), then fall back. Answering
+  // the tool gate releases the awaiting write route; answering the OpenCode gate replies to the
+  // runtime.
   app.post<{ Params: { requestID: string } }>(
     "/api/approvals/:requestID",
     async (req, reply) => {
-      if (!deps.approvals) {
+      if (!deps.toolApprovals && !deps.approvals) {
         return reply.code(503).send({ error: "approval gate unavailable" });
       }
 
@@ -812,6 +845,15 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
           .send({ error: "invalid approval decision", details: parsed.error.issues });
       }
 
+      // The write-tool gate holds this request → answer it and release the paused write route.
+      if (deps.toolApprovals?.get(req.params.requestID)) {
+        const result = deps.toolApprovals.reply(req.params.requestID, parsed.data.action);
+        return reply.code(200).send(result);
+      }
+
+      if (!deps.approvals) {
+        return reply.code(404).send({ error: `no pending approval for request "${req.params.requestID}"` });
+      }
       try {
         const result = await deps.approvals.reply(
           req.params.requestID,
@@ -915,6 +957,212 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       return reply.code(422).send({ error: `could not run query: ${message}` });
     }
     return reply.code(200).send({ result });
+  });
+
+  // FR8/FR10 write tools. These are the backend half of the four approval-gated write tools.
+  // OpenCode does not gate a custom plugin tool, so the pause is enforced HERE: each route opens
+  // an inline approval on the tool gate and AWAITS a human's answer before it executes — nothing
+  // is written unapproved. A rejected approval returns `{ approved: false }` (200) and performs
+  // no write; the plugin turns that into a "denied, nothing written" message. Each route resolves
+  // its destination server-side from the session (never a model-sent path, FR5b) and runs the
+  // corresponding data-plane tool. Status map: 503 unwired store/gate, 400 bad body, 404 unknown
+  // source, 422 a write that could not complete (so the agent gets the detail), 200 with the
+  // result (or `{ approved: false }` on rejection).
+
+  /**
+   * Pause a write on the inline approval gate: register the pending approval (which surfaces it
+   * on the chat SSE stream) and await the human's answer. Resolves `true` when approved.
+   */
+  async function awaitWriteApproval(
+    sessionID: string,
+    tool: string,
+    metadata: Record<string, unknown>,
+  ): Promise<boolean> {
+    const { decided } = deps.toolApprovals!.request({ sessionID, tool, metadata });
+    return (await decided).status === "approved";
+  }
+
+  // `land_parquet`: land a session's connected source to Parquet under `<landingDir>/<sessionID>/`.
+  app.post("/api/internal/tools/land_parquet", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    if (!deps.toolApprovals) {
+      return reply.code(503).send({ error: "approval gate unavailable" });
+    }
+    const parsed = LandParquetRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid land_parquet request", details: parsed.error.issues });
+    }
+
+    const source = await getSessionSource(deps.store, parsed.data.sessionID, parsed.data.source);
+    if (!source) {
+      return reply.code(404).send({ error: "source not found" });
+    }
+
+    const approved = await awaitWriteApproval(parsed.data.sessionID, "land_parquet", {
+      tool: "land_parquet",
+      source: parsed.data.source,
+      ...(parsed.data.ingestionDate ? { ingestionDate: parsed.data.ingestionDate } : {}),
+      summary: `Land source "${parsed.data.source}" to partitioned Parquet.`,
+    });
+    if (!approved) return reply.code(200).send({ approved: false });
+
+    try {
+      const result = await landParquet(deps.store, {
+        landingDir: join(landingDir, parsed.data.sessionID),
+        sourcePath: source.path,
+        dataset: source.name,
+        ingestionDate: parsed.data.ingestionDate,
+      });
+      return reply.code(200).send({
+        dataset: result.dataset,
+        ingestionDate: result.ingestionDate,
+        rowCount: result.rowCount,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(422).send({ error: `could not land source: ${message}` });
+    }
+  });
+
+  // `load_warehouse`: load a landed dataset into `raw`/`staging`. The landing path is reconstructed
+  // server-side from the session + dataset name (same sanitizer the land step used) so no path is
+  // trusted from the model.
+  app.post("/api/internal/tools/load_warehouse", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    if (!deps.toolApprovals) {
+      return reply.code(503).send({ error: "approval gate unavailable" });
+    }
+    const parsed = LoadWarehouseRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid load_warehouse request", details: parsed.error.issues });
+    }
+
+    const targetSchema = parsed.data.schema ?? "raw";
+    const targetTable = parsed.data.table ?? "source";
+    const approved = await awaitWriteApproval(parsed.data.sessionID, "load_warehouse", {
+      tool: "load_warehouse",
+      dataset: parsed.data.dataset,
+      schema: targetSchema,
+      table: targetTable,
+      summary: `Load dataset "${parsed.data.dataset}" into ${targetSchema}.${targetTable}.`,
+    });
+    if (!approved) return reply.code(200).send({ approved: false });
+
+    const landingPath = join(
+      landingDir,
+      parsed.data.sessionID,
+      safeDatasetName(parsed.data.dataset),
+    );
+    try {
+      const result = await loadWarehouse(deps.store, {
+        landingPath,
+        schema: parsed.data.schema as "raw" | "staging" | undefined,
+        table: parsed.data.table,
+      });
+      return reply.code(200).send({
+        qualifiedTable: result.qualifiedTable,
+        schema: result.schema,
+        table: result.table,
+        rowCount: result.rowCount,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(422).send({ error: `could not load dataset: ${message}` });
+    }
+  });
+
+  // `run_transform`: execute the reviewed transform SQL into `marts.<targetTable>`. The SQL runs
+  // verbatim — it is the exact text the human approved at the gate.
+  app.post("/api/internal/tools/run_transform", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    if (!deps.toolApprovals) {
+      return reply.code(503).send({ error: "approval gate unavailable" });
+    }
+    const parsed = RunTransformRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid run_transform request", details: parsed.error.issues });
+    }
+
+    // The metadata carries the EXACT SQL the human reviews before it runs verbatim (FR10).
+    const approved = await awaitWriteApproval(parsed.data.sessionID, "run_transform", {
+      tool: "run_transform",
+      sql: parsed.data.sql,
+      targetTable: parsed.data.targetTable,
+      summary: `Run transform SQL into marts.${parsed.data.targetTable}.`,
+    });
+    if (!approved) return reply.code(200).send({ approved: false });
+
+    try {
+      const result = await runTransform(deps.store, {
+        sql: parsed.data.sql,
+        targetTable: parsed.data.targetTable,
+      });
+      return reply.code(200).send({
+        qualifiedTable: result.qualifiedTable,
+        table: result.table,
+        rowCount: result.rowCount,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(422).send({ error: `could not run transform: ${message}` });
+    }
+  });
+
+  // `publish_serving`: export a `marts` table to CSV under `<servingDir>/<sessionID>/` and register
+  // it in the served-table registry. The session id namespaces the export (the v2 owner of a
+  // published table is the session).
+  app.post("/api/internal/tools/publish_serving", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    if (!deps.toolApprovals) {
+      return reply.code(503).send({ error: "approval gate unavailable" });
+    }
+    const parsed = PublishServingRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid publish_serving request", details: parsed.error.issues });
+    }
+
+    const servedName = parsed.data.name ?? parsed.data.table;
+    const approved = await awaitWriteApproval(parsed.data.sessionID, "publish_serving", {
+      tool: "publish_serving",
+      table: parsed.data.table,
+      name: servedName,
+      summary: `Publish marts.${parsed.data.table} as endpoint "${servedName}".`,
+    });
+    if (!approved) return reply.code(200).send({ approved: false });
+
+    try {
+      const result = await publishServing(deps.store, {
+        servingDir,
+        projectId: parsed.data.sessionID,
+        table: parsed.data.table,
+        name: parsed.data.name,
+      });
+      return reply.code(200).send({
+        name: result.name,
+        endpoint: result.endpoint,
+        csvEndpoint: result.csvEndpoint,
+        rowCount: result.rowCount,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(422).send({ error: `could not publish table: ${message}` });
+    }
   });
 
   return app;

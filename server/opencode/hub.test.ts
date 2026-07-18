@@ -58,6 +58,32 @@ describe("createEventHub", () => {
     expect(hub.lastSeq()).toBe(2);
   });
 
+  it("publish() injects a backend event, sequenced + fanned like a bridge event", () => {
+    const src = fakeBridge();
+    const hub = createEventHub(src.bridge);
+    const got: SequencedEvent[] = [];
+    hub.subscribe((e) => got.push(e), { sessionId: "s1" });
+
+    src.emit(idle("s1")); // seq 1 from the bridge
+    // A backend-originated approval (V4.1) rides the same stream via publish().
+    const approval: NormalizedEvent = {
+      kind: "approval",
+      sessionID: "s1",
+      requestID: "req_1",
+      type: "run_transform",
+      metadata: { sql: "SELECT 1" },
+    };
+    hub.publish(approval); // seq 2, injected
+    hub.publish({ kind: "approval", sessionID: "s2", requestID: "req_2", type: "land_parquet", metadata: {} }); // filtered
+
+    expect(got).toEqual([
+      { seq: 1, event: idle("s1") },
+      { seq: 2, event: approval },
+    ]);
+    // The filtered publish still consumed a global seq — publish and bridge share one counter.
+    expect(hub.lastSeq()).toBe(3);
+  });
+
   it("a fresh subscriber (no lastSeq) receives no backlog, only live events", () => {
     const src = fakeBridge();
     const hub = createEventHub(src.bridge);

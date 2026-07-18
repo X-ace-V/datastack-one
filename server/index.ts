@@ -4,6 +4,7 @@ import { createDatastackOpencode } from "./opencode/client.js";
 import { createEventBridge } from "./opencode/bridge.js";
 import { createEventHub } from "./opencode/hub.js";
 import { createApprovalGate } from "./opencode/approvals.js";
+import { createToolApprovalGate } from "./opencode/tool-approvals.js";
 import { SessionManager } from "./opencode/sessions.js";
 
 /** Boot entrypoint: start the OpenCode runtime, then bind the HTTP server. */
@@ -33,12 +34,17 @@ async function main(): Promise<void> {
   // Sequence the normalized stream into a per-session, replayable SSE fan-out (FR3) that the
   // chat UI subscribes to over `GET /api/events`.
   const events = createEventHub(bridge);
+  // The write-tool approval gate (FR8/FR10): OpenCode does not gate custom plugin tools, so each
+  // write route pauses on this gate before executing. It surfaces each pending approval inline by
+  // publishing onto the same SSE stream, so the chat's approval pill renders it.
+  const toolApprovals = createToolApprovalGate((event) => events.publish(event));
   // Orchestrate chat sessions over the runtime + store (FR1) so the session routes can
   // create/list/get/rename/delete conversations.
   const sessions = new SessionManager(runtime.client, store);
   const app = buildServer({
     opencode: runtime.client,
     approvals,
+    toolApprovals,
     store,
     sessions,
     events,

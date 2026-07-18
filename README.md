@@ -98,12 +98,16 @@ conversational shell also needs are not built yet.
 | `POST /api/approvals/:requestID` | Answer an OpenCode permission request (FR10). |
 | `GET /api/projects/:id/served` | Endpoints this project has published. |
 | `GET /api/serve/:name` · `GET /api/serve/:name.csv` | The generated endpoint: JSON preview / CSV download (FR11). |
-| `POST /api/internal/tools/list_sources` · `POST /api/internal/tools/profile_source` · `POST /api/internal/tools/run_query` | Loopback the agent's data-tools plugin calls; session-scoped, name-only (FR4/FR6/FR7). |
+| `POST /api/internal/tools/list_sources` · `POST /api/internal/tools/profile_source` · `POST /api/internal/tools/run_query` | Loopback the agent's read data-tools call; session-scoped, name-only (FR4/FR6/FR7). |
+| `POST /api/internal/tools/land_parquet` · `POST /api/internal/tools/load_warehouse` · `POST /api/internal/tools/run_transform` · `POST /api/internal/tools/publish_serving` | Loopback for the four approval-gated write tools; executed only after inline approval (FR8). |
 
 The `internal/tools/*` routes are the loopback the in-process OpenCode plugin
 (`server/tools/plugin.ts`) calls — the agent's tools run in a separate runtime with no
 direct store access, so they reach the store through these. They take a session id and a
-source **name** and never a raw path or credential (FR5b).
+source **name** and never a raw path or credential (FR5b). The write routes
+(`land_parquet`/`load_warehouse`/`run_transform`/`publish_serving`) are reached only after
+the plugin has paused the turn for an inline human approval (`context.ask`), so nothing is
+written unapproved (FR8/FR10).
 
 ---
 

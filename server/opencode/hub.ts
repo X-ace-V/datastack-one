@@ -38,6 +38,13 @@ export interface EventHub {
    * unsubscribe function the route calls when the client disconnects.
    */
   subscribe(listener: SequencedListener, options?: EventStreamOptions): () => void;
+  /**
+   * Inject a normalized event into the stream from the backend (not the OpenCode bridge) —
+   * sequenced and fanned out exactly like a bridge event. This is how a backend-originated
+   * inline approval (the write-tool gate, V4.1) and its resolution ride the same per-session,
+   * replayable SSE stream as the agent's text/tool events, so the approval pill renders inline.
+   */
+  publish(event: NormalizedEvent): void;
   /** Detach from the bridge and drop all subscribers. Idempotent-safe for shutdown. */
   close(): void;
   /** The highest sequence number assigned so far — for tests/diagnostics. */
@@ -60,17 +67,24 @@ export function createEventHub(
   const buffer = new ReplayBuffer(capacity);
   const subscribers = new Set<Subscriber>();
 
-  // Single attachment to the bridge: sequence every event, then fan it to matching subscribers.
-  const detach = bridge.subscribe((event: NormalizedEvent) => {
+  // Sequence one event and fan it to matching subscribers. Shared by the bridge subscription
+  // and by publish() so a backend-injected event is indistinguishable from a bridge event.
+  function dispatch(event: NormalizedEvent): void {
     const sequenced = buffer.append(event);
     for (const sub of subscribers) {
       if (sub.sessionId === undefined || sub.sessionId === event.sessionID) {
         sub.fn(sequenced);
       }
     }
-  });
+  }
+
+  // Single attachment to the bridge: sequence every event, then fan it to matching subscribers.
+  const detach = bridge.subscribe(dispatch);
 
   return {
+    publish(event) {
+      dispatch(event);
+    },
     subscribe(listener, options = {}) {
       const { sessionId, lastSeq } = options;
       // Replay the backlog, then register for live events in the SAME synchronous tick. This

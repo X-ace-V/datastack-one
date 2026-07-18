@@ -59,3 +59,95 @@ export const RunQueryResponseSchema = z.object({
   result: QueryResultSchema,
 });
 export type RunQueryResponse = z.infer<typeof RunQueryResponseSchema>;
+
+/**
+ * Wire contracts for the **write** tools (PRD FR8/FR10). These are the four approval-gated
+ * tools — `land_parquet`, `load_warehouse`, `run_transform`, `publish_serving`. The plugin
+ * pauses each turn for a human decision (`context.ask`) BEFORE it POSTs to the matching route
+ * here, so the route only ever executes an already-approved write (the gate is enforced in the
+ * plugin, not here — the loopback binds to 127.0.0.1 and is only reachable in-process). Every
+ * request is scoped to a `sessionID`; no on-disk path or credential crosses the boundary in
+ * either direction (FR5b), so the landing/serving destinations are derived server-side from the
+ * session and a sanitized logical name, never sent by the model.
+ */
+
+/**
+ * `land_parquet` request: land a session's connected source to Parquet. The model names the
+ * source (resolved to its path backend-side); the ingestion date is optional (defaults to today).
+ */
+export const LandParquetRequestSchema = z.object({
+  sessionID: z.string().min(1),
+  source: z.string().min(1),
+  ingestionDate: z.string().optional(),
+});
+export type LandParquetRequest = z.infer<typeof LandParquetRequestSchema>;
+
+/** `land_parquet` response: the landed dataset, its ingestion date, and rows written (no path). */
+export const LandParquetResponseSchema = z.object({
+  dataset: z.string().min(1),
+  ingestionDate: z.string().min(1),
+  rowCount: z.number().int().nonnegative(),
+});
+export type LandParquetResponse = z.infer<typeof LandParquetResponseSchema>;
+
+/**
+ * `load_warehouse` request: load a previously-landed dataset (by its logical name) into the
+ * warehouse. The backend reconstructs the landing path from the session + dataset — the model
+ * never sees or sends a path. `schema`/`table` default to `raw.source`.
+ */
+export const LoadWarehouseRequestSchema = z.object({
+  sessionID: z.string().min(1),
+  dataset: z.string().min(1),
+  schema: z.string().optional(),
+  table: z.string().optional(),
+});
+export type LoadWarehouseRequest = z.infer<typeof LoadWarehouseRequestSchema>;
+
+/** `load_warehouse` response: the qualified table created and rows loaded. */
+export const LoadWarehouseResponseSchema = z.object({
+  qualifiedTable: z.string().min(1),
+  schema: z.string().min(1),
+  table: z.string().min(1),
+  rowCount: z.number().int().nonnegative(),
+});
+export type LoadWarehouseResponse = z.infer<typeof LoadWarehouseResponseSchema>;
+
+/**
+ * `run_transform` request: execute the reviewed transform SQL into `marts.<targetTable>`. The
+ * SQL is the exact text a human approved at the gate; it runs verbatim.
+ */
+export const RunTransformRequestSchema = z.object({
+  sessionID: z.string().min(1),
+  sql: z.string().min(1),
+  targetTable: z.string().min(1),
+});
+export type RunTransformRequest = z.infer<typeof RunTransformRequestSchema>;
+
+/** `run_transform` response: the qualified `marts` table created and rows written. */
+export const RunTransformResponseSchema = z.object({
+  qualifiedTable: z.string().min(1),
+  table: z.string().min(1),
+  rowCount: z.number().int().nonnegative(),
+});
+export type RunTransformResponse = z.infer<typeof RunTransformResponseSchema>;
+
+/**
+ * `publish_serving` request: publish a `marts` table as a served endpoint + CSV export. The
+ * served name (URL segment) defaults to the table name; the export destination is derived
+ * server-side under the session's serving dir.
+ */
+export const PublishServingRequestSchema = z.object({
+  sessionID: z.string().min(1),
+  table: z.string().min(1),
+  name: z.string().optional(),
+});
+export type PublishServingRequest = z.infer<typeof PublishServingRequestSchema>;
+
+/** `publish_serving` response: the served name, its REST endpoints, and rows served (no path). */
+export const PublishServingResponseSchema = z.object({
+  name: z.string().min(1),
+  endpoint: z.string().min(1),
+  csvEndpoint: z.string().min(1),
+  rowCount: z.number().int().nonnegative(),
+});
+export type PublishServingResponse = z.infer<typeof PublishServingResponseSchema>;

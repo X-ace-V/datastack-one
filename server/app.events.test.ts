@@ -48,6 +48,9 @@ function countingHub(inner: EventHub): { hub: EventHub; active: () => number } {
         off();
       };
     },
+    publish(event) {
+      inner.publish(event);
+    },
     close() {
       inner.close();
     },

@@ -10,16 +10,28 @@ import { tool } from "@opencode-ai/plugin/tool";
  * calls back to the backend over loopback (`/api/internal/tools/*`), which owns the store. This
  * mirrors the Crux "internal.ts" loopback pattern the ARCHITECTURE cites.
  *
- * Two read-only tools ship here (V3.1): `list_sources` and `profile_source`. The write tools
- * (`land_parquet`, …) and `run_query` land in later phases. The agent addresses a source by its
- * `name`; the raw path is resolved backend-side and never crosses this boundary (FR5b).
+ * Read tools (`list_sources`, `profile_source`, `run_query`) execute immediately; the write tools
+ * (`land_parquet`, `load_warehouse`, `run_transform`, `publish_serving`) are approval-gated
+ * (V4.1, FR8/FR10). OpenCode does NOT gate a custom plugin tool — a plugin's `context.ask(...)`
+ * auto-resolves in the embedded runtime (verified live) — so the pause is enforced BACKEND-side:
+ * a write tool's loopback route blocks on a human approval before it executes, and returns
+ * `{ approved: false }` if rejected. This plugin just calls that route and turns a rejection into
+ * a "denied, nothing written" message. The agent addresses a source by its `name`; the raw path
+ * is resolved backend-side and never crosses this boundary (FR5b).
  */
 
 // zod, re-exported by the plugin SDK so the plugin and its host agree on one zod instance.
 const z = tool.schema;
 
-/** How long a loopback call may run before the tool gives up and reports a clear failure. */
+/** How long a normal (read) loopback call may run before the tool reports a clear failure. */
 const INTERNAL_CALL_TIMEOUT_MS = 30_000;
+
+/**
+ * Write tools call a loopback route that BLOCKS on a human approval (V4.1), so they need a far
+ * longer ceiling than a read — a person may take minutes to review the SQL. This bounds a truly
+ * stuck request without cutting off a human who is still deciding.
+ */
+const WRITE_CALL_TIMEOUT_MS = 10 * 60_000;
 
 /**
  * Base URL of the Fastify backend to call back into. Set in the parent process before the
@@ -34,9 +46,10 @@ function backendBaseUrl(): string {
 async function callBackend(
   path: string,
   body: Record<string, unknown>,
+  timeoutMs: number = INTERNAL_CALL_TIMEOUT_MS,
 ): Promise<{ ok: boolean; status: number; body: unknown }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), INTERNAL_CALL_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${backendBaseUrl()}${path}`, {
       method: "POST",
@@ -139,6 +152,58 @@ function formatProfile(source: string, profile: SourceProfile): string {
   const dates = profile.dateColumns.length > 0 ? profile.dateColumns.join(", ") : "none";
   lines.push("", `Candidate keys: ${keys}`, `Date columns: ${dates}`);
   return lines.join("\n");
+}
+
+/** What `land_parquet` returns once a landed dataset persists. */
+interface LandResult {
+  dataset: string;
+  ingestionDate: string;
+  rowCount: number;
+}
+
+/** What `load_warehouse` returns once a warehouse table is materialized. */
+interface LoadResult {
+  qualifiedTable: string;
+  schema: string;
+  table: string;
+  rowCount: number;
+}
+
+/** What `run_transform` returns once the reviewed SQL materializes a marts table. */
+interface TransformResult {
+  qualifiedTable: string;
+  table: string;
+  rowCount: number;
+}
+
+/** What `publish_serving` returns once a marts table is exported and registered. */
+interface PublishResult {
+  name: string;
+  endpoint: string;
+  csvEndpoint: string;
+  rowCount: number;
+}
+
+/**
+ * The message a write tool returns to the model when the human denied its approval.
+ * `body.approved === false` from a write route means the human rejected the inline approval.
+ */
+function deniedMessage(tool: string): string {
+  return `${tool} was not run: the approval was denied, so nothing was written.`;
+}
+
+/**
+ * Call a write route, which BLOCKS on a human approval before it executes (V4.1). Returns
+ * `{ denied: true }` when the human rejected the inline approval (`body.approved === false`),
+ * otherwise the route's envelope. The long write timeout covers a human still deciding.
+ */
+async function callWriteRoute(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ denied: boolean; ok: boolean; status: number; body: unknown }> {
+  const { ok, status, body: resBody } = await callBackend(path, body, WRITE_CALL_TIMEOUT_MS);
+  const denied = ok && (resBody as { approved?: boolean })?.approved === false;
+  return { denied, ok, status, body: resBody };
 }
 
 export const DatastackToolsPlugin: Plugin = async () => {
@@ -244,6 +309,177 @@ export const DatastackToolsPlugin: Plugin = async () => {
             title: `${result.rowCount} row${result.rowCount === 1 ? "" : "s"}`,
             output: formatQueryResult(result),
             metadata: { result },
+          };
+        },
+      }),
+
+      land_parquet: tool({
+        description:
+          "Land a connected source to Parquet in the data lake, partitioned by ingestion date. " +
+          "Pass the exact source name from list_sources. This WRITES data, so it pauses for your " +
+          "explicit approval before it runs. Do this first when building a pipeline from a source.",
+        args: {
+          source: z
+            .string()
+            .describe("The connected source to land (the exact name from list_sources)."),
+          ingestionDate: z
+            .string()
+            .optional()
+            .describe("Ingestion date to partition under, YYYY-MM-DD. Defaults to today."),
+        },
+        async execute(args, context) {
+          const { denied, ok, status, body } = await callWriteRoute(
+            "/api/internal/tools/land_parquet",
+            {
+              sessionID: context.sessionID,
+              source: args.source,
+              ...(args.ingestionDate ? { ingestionDate: args.ingestionDate } : {}),
+            },
+          );
+          if (denied) return deniedMessage("land_parquet");
+          if (status === 404) {
+            return (
+              `No source named "${args.source}" is connected to this session. ` +
+              "Call list_sources to see the connected sources."
+            );
+          }
+          if (status === 422) {
+            const detail = (body as { error?: string })?.error ?? "the source could not be landed";
+            return `land_parquet failed: ${detail}.`;
+          }
+          if (!ok) return `Failed to land "${args.source}" (status ${status}).`;
+          const result = body as LandResult;
+          return {
+            title: `Landed ${result.dataset}`,
+            output:
+              `Landed source "${args.source}" as dataset "${result.dataset}" ` +
+              `(${result.rowCount} rows, ingestion_date=${result.ingestionDate}). ` +
+              `Next, load it with load_warehouse using dataset="${result.dataset}".`,
+            metadata: { land: result },
+          };
+        },
+      }),
+
+      load_warehouse: tool({
+        description:
+          "Load a previously landed dataset into the warehouse (raw/staging schema). Pass the " +
+          "dataset name returned by land_parquet. Defaults to raw.source, the table transforms " +
+          "read from. This WRITES data, so it pauses for your explicit approval before it runs.",
+        args: {
+          dataset: z
+            .string()
+            .describe("The landed dataset name to load (returned by land_parquet)."),
+          schema: z
+            .string()
+            .optional()
+            .describe("Target schema: raw (default) or staging."),
+          table: z
+            .string()
+            .optional()
+            .describe("Target table name. Defaults to source (i.e. raw.source)."),
+        },
+        async execute(args, context) {
+          const { denied, ok, status, body } = await callWriteRoute(
+            "/api/internal/tools/load_warehouse",
+            {
+              sessionID: context.sessionID,
+              dataset: args.dataset,
+              ...(args.schema ? { schema: args.schema } : {}),
+              ...(args.table ? { table: args.table } : {}),
+            },
+          );
+          if (denied) return deniedMessage("load_warehouse");
+          if (status === 422) {
+            const detail = (body as { error?: string })?.error ?? "the dataset could not be loaded";
+            return `load_warehouse failed: ${detail}. Make sure the dataset was landed first.`;
+          }
+          if (!ok) return `Failed to load dataset "${args.dataset}" (status ${status}).`;
+          const result = body as LoadResult;
+          return {
+            title: `Loaded ${result.qualifiedTable}`,
+            output:
+              `Loaded dataset "${args.dataset}" into ${result.qualifiedTable} ` +
+              `(${result.rowCount} rows).`,
+            metadata: { load: result },
+          };
+        },
+      }),
+
+      run_transform: tool({
+        description:
+          "Execute transformation SQL to build a marts table. Provide the full SQL (a " +
+          "CREATE OR REPLACE TABLE marts.<target> AS SELECT ... statement) and the target table " +
+          "name. This WRITES data and runs your exact SQL, so it pauses for your explicit approval " +
+          "— the exact SQL is shown for review — before it runs.",
+        args: {
+          sql: z
+            .string()
+            .describe("The full transform SQL to execute (CREATE OR REPLACE TABLE marts.<target> AS …)."),
+          targetTable: z
+            .string()
+            .describe("The unqualified marts table the SQL creates (e.g. daily_branch_summary)."),
+        },
+        async execute(args, context) {
+          const { denied, ok, status, body } = await callWriteRoute(
+            "/api/internal/tools/run_transform",
+            {
+              sessionID: context.sessionID,
+              sql: args.sql,
+              targetTable: args.targetTable,
+            },
+          );
+          if (denied) return deniedMessage("run_transform");
+          if (status === 422) {
+            const detail = (body as { error?: string })?.error ?? "the transform could not be run";
+            return `run_transform failed: ${detail}. Check the SQL and the source tables it reads.`;
+          }
+          if (!ok) return `Failed to run the transform (status ${status}).`;
+          const result = body as TransformResult;
+          return {
+            title: `Built ${result.qualifiedTable}`,
+            output:
+              `Executed the transform into ${result.qualifiedTable} (${result.rowCount} rows).`,
+            metadata: { transform: result },
+          };
+        },
+      }),
+
+      publish_serving: tool({
+        description:
+          "Publish a marts table as a REST endpoint plus a CSV export. Pass the marts table name " +
+          "(and optionally a served name for the URL). This WRITES an export and registers a public " +
+          "endpoint, so it pauses for your explicit approval before it runs.",
+        args: {
+          table: z
+            .string()
+            .describe("The unqualified marts table to publish (e.g. daily_branch_summary)."),
+          name: z
+            .string()
+            .optional()
+            .describe("Served name / URL segment. Defaults to the table name."),
+        },
+        async execute(args, context) {
+          const { denied, ok, status, body } = await callWriteRoute(
+            "/api/internal/tools/publish_serving",
+            {
+              sessionID: context.sessionID,
+              table: args.table,
+              ...(args.name ? { name: args.name } : {}),
+            },
+          );
+          if (denied) return deniedMessage("publish_serving");
+          if (status === 422) {
+            const detail = (body as { error?: string })?.error ?? "the table could not be published";
+            return `publish_serving failed: ${detail}. Make sure the marts table exists.`;
+          }
+          if (!ok) return `Failed to publish "${args.table}" (status ${status}).`;
+          const result = body as PublishResult;
+          return {
+            title: `Published ${result.name}`,
+            output:
+              `Published marts.${args.table} as "${result.name}" (${result.rowCount} rows). ` +
+              `REST: ${result.endpoint} · CSV: ${result.csvEndpoint}.`,
+            metadata: { publish: result },
           };
         },
       }),
