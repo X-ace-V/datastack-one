@@ -5,9 +5,10 @@ import { InlineSteps } from "./InlineSteps";
 import type { InlineBlock } from "../store/sessionStore";
 
 /**
- * Component test for InlineSteps (V2.5, FR2, ARCHITECTURE §4). Asserts blocks render in reading
- * order — reasoning, then a tool card, then text — with each tool card carrying its status; that
- * reasoning is a collapsible section; and that an approval block (the V2.6 seam) renders nothing.
+ * Component test for InlineSteps (V2.5/V2.6, FR2/FR10, ARCHITECTURE §4). Asserts blocks render in
+ * reading order — reasoning, then a tool card, then text — with each tool card carrying its status;
+ * that reasoning is a collapsible section; that an empty-text block renders nothing; and that an
+ * approval block renders an inline approval pill (V2.6).
  */
 describe("InlineSteps", () => {
   afterEach(cleanup);
@@ -48,18 +49,27 @@ describe("InlineSteps", () => {
     expect(screen.getByText("the hidden chain of thought")).toBeTruthy();
   });
 
-  it("renders nothing for an approval block (V2.6 seam) or an empty-text block", () => {
+  it("renders an inline approval pill for an approval block, skipping empty text (V2.6)", () => {
     const blocks: InlineBlock[] = [
       { kind: "text", partID: "p1", text: "" },
       {
         kind: "approval",
         requestID: "req-1",
         approvalType: "run_transform",
-        metadata: { sql: "CREATE TABLE ..." },
+        metadata: { sql: "CREATE TABLE marts.report AS SELECT 1" },
         status: "pending",
       },
     ];
     const { container } = render(<InlineSteps blocks={blocks} />);
-    expect(container.textContent).toBe("");
+
+    // The empty-text block renders nothing; the approval renders a pill in its place.
+    const children = Array.from(container.firstElementChild!.children);
+    expect(children).toHaveLength(1);
+    const pill = children[0];
+    expect(pill?.getAttribute("data-role")).toBe("approval");
+    expect(pill?.getAttribute("data-approval-type")).toBe("run_transform");
+    expect(screen.getByTestId("approval-sql").textContent).toContain("CREATE TABLE marts.report");
+    expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
 });

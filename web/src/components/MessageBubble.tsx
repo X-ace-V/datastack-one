@@ -7,15 +7,14 @@ import { InlineSteps } from "./InlineSteps";
  * block of the agent's streamed reply, rendered by {@link InlineSteps} in reading order —
  * streamed text, reasoning, and tool cards (V2.5), plus inline approval pills (V2.6).
  *
- * An assistant turn with no renderable content yet (e.g. only a not-yet-rendered approval seam)
- * renders nothing rather than an empty bubble.
+ * An assistant turn with no renderable content yet renders nothing rather than an empty bubble.
  */
 export interface MessageBubbleProps {
   message: ChatMessage;
 }
 
-/** Block kinds InlineSteps renders visibly today (approval is the V2.6 seam). */
-const RENDERABLE_KINDS = new Set(["text", "reasoning", "tool"]);
+/** Block kinds InlineSteps renders visibly — an approval-only turn (a paused write) still shows. */
+const RENDERABLE_KINDS = new Set(["text", "reasoning", "tool", "approval"]);
 
 export function MessageBubble({ message }: MessageBubbleProps) {
   if (message.role === "user") {

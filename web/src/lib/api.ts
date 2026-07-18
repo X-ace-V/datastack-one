@@ -249,6 +249,41 @@ export async function cancelChat(sessionId: string): Promise<void> {
   }
 }
 
+/** A human's decision on a pending inline approval (FR10), mirroring the backend `ApprovalAction`. */
+export type ApprovalAction = "approve" | "reject";
+
+/**
+ * The audit record returned by `POST /api/approvals/:requestID`, mirroring the backend
+ * `ApprovalResultSchema`: the request answered, the action taken, the gated tool type, and the
+ * terminal status the pill shows.
+ */
+export interface ApprovalResult {
+  requestID: string;
+  action: ApprovalAction;
+  type: string;
+  status: "approved" | "rejected";
+}
+
+/**
+ * Answer a pending inline approval (FR10) — relay a human's approve/reject for a paused write
+ * tool to `POST /api/approvals/:requestID`. Approve runs the gated call once; reject aborts it.
+ * The resolved status also streams back as an `approval_resolved` event, which clears the pill.
+ */
+export async function answerApproval(
+  requestID: string,
+  action: ApprovalAction,
+): Promise<ApprovalResult> {
+  const res = await fetch(`/api/approvals/${requestID}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to answer approval"));
+  }
+  return (await res.json()) as ApprovalResult;
+}
+
 /** List all projects, newest first. */
 export async function listProjects(): Promise<Project[]> {
   const res = await fetch("/api/projects");

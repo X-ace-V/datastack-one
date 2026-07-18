@@ -1,15 +1,14 @@
 import { useState } from "react";
 import type { InlineBlock } from "../store/sessionStore";
+import { ApprovalPill } from "./ApprovalPill";
 import { ToolCard } from "./ToolCard";
 
 /**
- * The ordered body of an assistant turn (TASKS V2.5, PRD FR2, ARCHITECTURE §4). The store folds
- * the event stream into an ordered list of {@link InlineBlock}s — streamed text, agent reasoning,
- * tool cards, and (V2.6) inline approval pills — and this renders them in exactly that reading
- * order, so a tool card sits where it streamed and reasoning stays before the text it produced.
- * Mirrors Crux's `InlineSteps`, sized down to this app's block union.
- *
- * `approval` blocks are the seam for V2.6 (`ApprovalPill`); until then they render nothing.
+ * The ordered body of an assistant turn (TASKS V2.5/V2.6, PRD FR2/FR10, ARCHITECTURE §4). The store
+ * folds the event stream into an ordered list of {@link InlineBlock}s — streamed text, agent
+ * reasoning, tool cards, and inline approval pills — and this renders them in exactly that reading
+ * order, so a tool card sits where it streamed, reasoning stays before the text it produced, and an
+ * approval pill sits next to the write tool it gates. Mirrors Crux's `InlineSteps`.
  */
 export interface InlineStepsProps {
   blocks: InlineBlock[];
@@ -62,8 +61,7 @@ export function InlineSteps({ blocks }: InlineStepsProps) {
           case "tool":
             return <ToolCard key={block.callID} block={block} />;
           case "approval":
-            // V2.6 seam — ApprovalPill renders these; nothing to show yet.
-            return null;
+            return <ApprovalPill key={block.requestID} block={block} />;
           default: {
             const _never: never = block;
             void _never;

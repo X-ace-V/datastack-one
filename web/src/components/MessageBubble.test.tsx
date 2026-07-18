@@ -62,7 +62,7 @@ describe("MessageBubble", () => {
     expect(screen.getByText("Thinking")).toBeTruthy();
   });
 
-  it("renders nothing for an assistant turn with only a V2.6 approval seam", () => {
+  it("renders an assistant turn holding only an approval pill (a paused write, V2.6)", () => {
     const message: AssistantMessage = {
       role: "assistant",
       id: "a3",
@@ -71,14 +71,16 @@ describe("MessageBubble", () => {
           kind: "approval",
           requestID: "req-1",
           approvalType: "run_transform",
-          metadata: {},
+          metadata: { sql: "CREATE TABLE marts.report AS SELECT 1" },
           status: "pending",
         },
       ],
     };
     const { container } = render(<MessageBubble message={message} />);
 
-    expect(container.querySelector('[data-role="assistant"]')).toBeNull();
-    expect(container.textContent).toBe("");
+    const wrapper = container.querySelector('[data-role="assistant"]');
+    expect(wrapper).toBeTruthy();
+    expect(wrapper!.querySelector('[data-role="approval"]')).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
   });
 });
