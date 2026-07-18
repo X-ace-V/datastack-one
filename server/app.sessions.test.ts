@@ -230,6 +230,68 @@ describe("session routes", () => {
     expect(res.statusCode).toBe(502);
   });
 
+  it("sets a session's per-session model and returns the updated row", async () => {
+    const app = await appWith(mockClient());
+    const created = SessionSchema.parse(
+      (await app.inject({ method: "POST", url: "/api/sessions", payload: {} })).json(),
+    );
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/sessions/${created.id}`,
+      payload: { model: "anthropic/claude-opus-4-5" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(SessionSchema.parse(res.json()).model).toBe("anthropic/claude-opus-4-5");
+    // A model change is store-only metadata — the runtime session is not renamed for it.
+    const stored = SessionSchema.parse(
+      (await app.inject({ method: "GET", url: `/api/sessions/${created.id}` })).json(),
+    );
+    expect(stored.model).toBe("anthropic/claude-opus-4-5");
+  });
+
+  it("clears a session's model with an explicit null", async () => {
+    const app = await appWith(mockClient());
+    const created = SessionSchema.parse(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/sessions",
+          payload: { model: "opencode/big-pickle" },
+        })
+      ).json(),
+    );
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/sessions/${created.id}`,
+      payload: { model: null },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(SessionSchema.parse(res.json()).model).toBeNull();
+  });
+
+  it("rejects a malformed model ref with 400", async () => {
+    const app = await appWith(mockClient());
+    const created = SessionSchema.parse(
+      (await app.inject({ method: "POST", url: "/api/sessions", payload: {} })).json(),
+    );
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/sessions/${created.id}`,
+      payload: { model: "no-slash" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("returns 404 setting the model of an unknown session", async () => {
+    const app = await appWith(mockClient());
+    const res = await app.inject({
+      method: "PATCH",
+      url: "/api/sessions/nope",
+      payload: { model: "opencode/big-pickle" },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
   it("deletes a session and returns 204, then 404 on re-fetch", async () => {
     const app = await appWith(mockClient());
     const created = SessionSchema.parse(

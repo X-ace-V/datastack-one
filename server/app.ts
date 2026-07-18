@@ -8,7 +8,7 @@ import { CreateProjectRequestSchema } from "./core/projects.js";
 import {
   ChatRequestSchema,
   CreateSessionRequestSchema,
-  RenameSessionRequestSchema,
+  UpdateSessionRequestSchema,
   SessionModelError,
 } from "./core/sessions.js";
 import { ProfileRequestSchema } from "./core/profile.js";
@@ -287,9 +287,11 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     },
   );
 
-  // FR1: rename a session. The title is required (400 otherwise); the manager checks the
-  // store before touching the runtime, so an unknown id is a clean 404 that never hits
-  // OpenCode. A runtime failure to rename is a 502. Status map: 503 unwired, 400 bad body,
+  // FR1/FR11: update a session — rename it and/or set its per-session model (V6.1). At least
+  // one of `title`/`model` is required (400 otherwise); the manager checks the store before
+  // touching the runtime, so an unknown id is a clean 404 that never hits OpenCode. A rename
+  // hits the runtime (502 on failure); a model change is store-only metadata. A malformed
+  // model ref is a 400 (SessionModelError). Status map: 503 unwired, 400 bad body/model,
   // 404 unknown, 502 runtime, 200 the updated session.
   app.patch<{ Params: { id: string } }>(
     "/api/sessions/:id",
@@ -298,20 +300,34 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         return reply.code(503).send({ error: "session manager unavailable" });
       }
 
-      const parsed = RenameSessionRequestSchema.safeParse(req.body);
+      const parsed = UpdateSessionRequestSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply
           .code(400)
-          .send({ error: "invalid rename", details: parsed.error.issues });
+          .send({ error: "invalid update", details: parsed.error.issues });
       }
 
       try {
-        const session = await deps.sessions.rename(req.params.id, parsed.data.title);
-        if (!session) {
-          return reply.code(404).send({ error: "session not found" });
+        // Apply each provided field; a missing session on either step is a clean 404. The last
+        // applied step's row is the response, so a combined title+model patch returns both.
+        let session = null;
+        if (parsed.data.title !== undefined) {
+          session = await deps.sessions.rename(req.params.id, parsed.data.title);
+          if (!session) {
+            return reply.code(404).send({ error: "session not found" });
+          }
+        }
+        if (parsed.data.model !== undefined) {
+          session = await deps.sessions.setModel(req.params.id, parsed.data.model);
+          if (!session) {
+            return reply.code(404).send({ error: "session not found" });
+          }
         }
         return reply.code(200).send(session);
       } catch (err) {
+        if (err instanceof SessionModelError) {
+          return reply.code(400).send({ error: err.message });
+        }
         if (err instanceof SessionRuntimeError) {
           return reply.code(502).send({ error: err.message });
         }

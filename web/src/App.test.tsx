@@ -108,6 +108,31 @@ describe("App chat flow (V2.4)", () => {
     updatedAt: "2026-07-17T10:00:00Z",
   };
 
+  // The per-session model control (V6.1) mounts with the chat, so the shell now reads the model
+  // catalog and the single session too — answer both with the shapes a live runtime returns.
+  const CATALOG = {
+    default: "opencode/big-pickle",
+    providers: [
+      {
+        id: "opencode",
+        name: "OpenCode Zen",
+        source: "custom",
+        models: [
+          {
+            ref: "opencode/big-pickle",
+            providerID: "opencode",
+            modelID: "big-pickle",
+            name: "Big Pickle",
+            toolcall: true,
+            reasoning: true,
+            cost: { input: 0, output: 0 },
+            free: true,
+          },
+        ],
+      },
+    ],
+  };
+
   beforeEach(() => {
     FakeEventSource.instances = [];
     vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
@@ -116,6 +141,13 @@ describe("App chat flow (V2.4)", () => {
       vi.fn(async (url: string, init?: RequestInit) => {
         const method = (init?.method ?? "GET").toUpperCase();
         if (method === "POST") return { ok: true, status: 202, json: async () => ({ id: "u1" }) };
+        // The model control reads the catalog and the active session.
+        if (String(url).includes("/api/models")) {
+          return { ok: true, status: 200, json: async () => CATALOG };
+        }
+        if (/\/api\/sessions\/ses_1$/.test(String(url))) {
+          return { ok: true, status: 200, json: async () => ({ ...SESSION, messages: [] }) };
+        }
         // The data panel's audit-trail view (V4.4) fetches the session's lineage once a session
         // is active — answer it with an empty trail so the shell renders without erroring.
         if (String(url).includes("/lineage")) {

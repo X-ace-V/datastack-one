@@ -20,6 +20,7 @@ import {
   listMessages,
   listSessions,
   renameSession,
+  updateSessionModel,
 } from "../store/sessions.js";
 
 /**
@@ -124,6 +125,28 @@ export class SessionManager {
     }
 
     return renameSession(this.store, id, title);
+  }
+
+  /**
+   * Set a session's per-session model (V6.1, FR11) — what the ModelPicker chose. Returns the
+   * updated session, or `null` if the id is unknown (checked against the store first). A `null`
+   * clears the override back to the platform default.
+   *
+   * The model is platform metadata (OpenCode picks the model per prompt, so `create`/`rename`
+   * never send it to the runtime), so this touches only the store — no runtime round-trip. A
+   * non-null ref is validated into `provider/model` before persisting, so a malformed ref is a
+   * clean {@link SessionModelError} (route → 400) that leaves the stored model untouched.
+   */
+  async setModel(id: string, model: string | null): Promise<Session | null> {
+    const existing = await getSession(this.store, id);
+    if (!existing) {
+      return null;
+    }
+    // Validate the shape before persisting; parseModelRef throws SessionModelError on a bad ref.
+    if (model !== null) {
+      parseModelRef(model);
+    }
+    return updateSessionModel(this.store, id, model);
   }
 
   /**

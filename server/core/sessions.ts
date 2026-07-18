@@ -42,6 +42,27 @@ export const RenameSessionRequestSchema = z.object({
 export type RenameSessionRequest = z.infer<typeof RenameSessionRequestSchema>;
 
 /**
+ * Request body for `PATCH /api/sessions/:id` (V1.2 rename + V6.1 per-session model). Both
+ * fields are optional but at least one must be present — an empty patch is a 400, not a no-op
+ * that returns the row unchanged. `title` renames (trimmed, non-empty); `model` sets the
+ * per-session model the picker (FR11) chose. A `model` of **null** clears the override back to
+ * the platform default (distinct from omitting it, which leaves the stored model untouched);
+ * a non-null model is trimmed and non-empty, and its `provider/model` shape is validated when
+ * it is applied ({@link parseModelRef}).
+ */
+export const UpdateSessionRequestSchema = z
+  .object({
+    /** New human label; trimmed and non-empty. Omitted → the title is left unchanged. */
+    title: z.string().trim().min(1).optional(),
+    /** New per-session model ref, or `null` to clear it. Omitted → the model is left unchanged. */
+    model: z.string().trim().min(1).nullable().optional(),
+  })
+  .refine((body) => body.title !== undefined || body.model !== undefined, {
+    message: "at least one of title or model is required",
+  });
+export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequestSchema>;
+
+/**
  * Request body for a chat turn (`POST /api/sessions/:id/chat`, FR2). `text` is the natural-
  * language prompt (trimmed, non-empty — an empty turn is meaningless). `model` optionally
  * overrides the model for this single turn; omitted, the session's stored model applies, and

@@ -126,6 +126,23 @@ export async function renameSession(
 }
 
 /**
+ * Set a session's per-session model and bump `updated_at` (V6.1, FR11). A `null` clears the
+ * override back to the platform default. Returns the updated row, or `null` if the id is
+ * unknown (so a caller can 404 rather than fabricate a row). The ref binds as a parameter.
+ */
+export async function updateSessionModel(
+  store: WarehouseStore,
+  id: string,
+  model: string | null,
+): Promise<Session | null> {
+  await store.run(
+    `UPDATE platform.sessions SET model = $1, updated_at = now() WHERE id = $2`,
+    [model, id],
+  );
+  return getSession(store, id);
+}
+
+/**
  * Delete a session and its entire message history and lineage. Returns `true` if a session
  * existed (so a caller can 404 on a false), `false` otherwise. The child rows (transcript
  * messages, lineage/audit events) are removed first so nothing orphaned survives their session.

@@ -13,11 +13,12 @@ import {
 } from "../lib/models";
 
 /**
- * Selects the model the generation stages run on (FR11, ARCHITECTURE §8): a quality-tier toggle
- * plus a provider-grouped model list, populated live from `GET /api/models`.
+ * Selects the model the agent runs on (FR11, ARCHITECTURE §8): a quality-tier toggle plus a
+ * provider-grouped model list, populated live from `GET /api/models`. Wired per session by
+ * {@link file://./SessionModelControl.tsx} (V6.1).
  *
  * The tier toggle is PRD §7's mitigation for "the free model is too weak" — one click moves the
- * whole flow onto a paid model. It is honest about what is actually reachable: the runtime only
+ * session onto a paid model. It is honest about what is actually reachable: the runtime only
  * discovers a paid provider when its API key is in the environment, so with no key the quality
  * tier genuinely has no models and the picker says which key to set instead of offering a
  * selection that would fail at prompt time.
@@ -32,7 +33,7 @@ export interface ModelPickerProps {
   value: string | null;
   /** Called with the chosen `provider/model` ref. */
   onChange: (ref: string) => void;
-  /** Disables the control, e.g. while a generation stage is in flight. */
+  /** Disables the control, e.g. while a turn is in flight. */
   disabled?: boolean;
 }
 
@@ -103,8 +104,8 @@ export function ModelPicker({ value, onChange, disabled = false }: ModelPickerPr
         Model
       </label>
       <p className="mt-1 text-xs text-slate-500">
-        The model that writes the plan, the SQL and the DQ checks. Everything is model-agnostic —
-        the pipeline itself runs the same either way.
+        The model this session's agent reasons and calls tools with. The data tools run the same
+        either way — the model chooses the steps, not what they can do.
       </p>
 
       <div

@@ -7,6 +7,7 @@ import {
   RenameSessionRequestSchema,
   SessionModelError,
   SessionSchema,
+  UpdateSessionRequestSchema,
 } from "./sessions.js";
 
 /**
@@ -40,6 +41,31 @@ describe("session contract", () => {
     expect(RenameSessionRequestSchema.safeParse({ title: " " }).success).toBe(
       false,
     );
+  });
+
+  it("accepts a title-only, model-only, or clearing update patch", () => {
+    // A rename-only patch.
+    expect(UpdateSessionRequestSchema.parse({ title: "  New  " })).toEqual({
+      title: "New",
+    });
+    // A model-only patch, trimmed.
+    expect(
+      UpdateSessionRequestSchema.parse({ model: " anthropic/claude-fable-5 " }),
+    ).toEqual({ model: "anthropic/claude-fable-5" });
+    // An explicit null clears the model back to the platform default (distinct from omitting it).
+    expect(UpdateSessionRequestSchema.parse({ model: null })).toEqual({ model: null });
+    // Both fields together are allowed.
+    expect(
+      UpdateSessionRequestSchema.parse({ title: "Both", model: "opencode/big-pickle" }),
+    ).toEqual({ title: "Both", model: "opencode/big-pickle" });
+  });
+
+  it("rejects an empty update patch and blank fields", () => {
+    // Neither field present — an empty patch is a 400, not a silent no-op.
+    expect(UpdateSessionRequestSchema.safeParse({}).success).toBe(false);
+    // A whitespace-only title/model is not a valid value.
+    expect(UpdateSessionRequestSchema.safeParse({ title: "   " }).success).toBe(false);
+    expect(UpdateSessionRequestSchema.safeParse({ model: "   " }).success).toBe(false);
   });
 
   it("allows a null session model but requires the other fields", () => {

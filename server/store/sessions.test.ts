@@ -8,6 +8,7 @@ import {
   listMessages,
   listSessions,
   renameSession,
+  updateSessionModel,
 } from "./sessions.js";
 
 /**
@@ -86,6 +87,26 @@ describe("session store", () => {
     expect((await getSession(store, "ses_r"))?.title).toBe("New name");
 
     expect(await renameSession(store, "missing", "x")).toBeNull();
+  });
+
+  it("sets a session's model, clears it, or returns null when unknown", async () => {
+    const store = await freshStore();
+    await insertSession(store, { id: "ses_mm", title: "Session" });
+
+    // A fresh session has no model override.
+    expect((await getSession(store, "ses_mm"))?.model).toBeNull();
+
+    const set = await updateSessionModel(store, "ses_mm", "anthropic/claude-opus-4-5");
+    expect(set?.model).toBe("anthropic/claude-opus-4-5");
+    expect((await getSession(store, "ses_mm"))?.model).toBe("anthropic/claude-opus-4-5");
+
+    // Null clears the override back to the platform default.
+    const cleared = await updateSessionModel(store, "ses_mm", null);
+    expect(cleared?.model).toBeNull();
+    expect((await getSession(store, "ses_mm"))?.model).toBeNull();
+
+    // An unknown id updates nothing and reports null so a caller can 404.
+    expect(await updateSessionModel(store, "missing", "opencode/big-pickle")).toBeNull();
   });
 
   it("assigns monotonic, per-session, gap-free message sequences", async () => {

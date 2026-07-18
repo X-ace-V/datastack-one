@@ -180,6 +180,45 @@ describe("SessionManager", () => {
     expect(client.session.update).not.toHaveBeenCalled();
   });
 
+  it("sets a session's model in the store without touching the runtime", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ title: "Session" });
+
+    const updated = await manager.setModel(created.id, "anthropic/claude-opus-4-5");
+    expect(updated?.model).toBe("anthropic/claude-opus-4-5");
+    expect((await getSession(store, created.id))?.model).toBe("anthropic/claude-opus-4-5");
+    // The model is platform metadata (OpenCode picks it per prompt) — no runtime round-trip.
+    expect(client.session.update).not.toHaveBeenCalled();
+
+    // Null clears the override back to the platform default.
+    const cleared = await manager.setModel(created.id, null);
+    expect(cleared?.model).toBeNull();
+  });
+
+  it("does not touch the runtime or store when setting the model of an unknown session", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+
+    expect(await manager.setModel("missing", "opencode/big-pickle")).toBeNull();
+    expect(client.session.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed model ref before persisting it", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ title: "Session", model: "opencode/big-pickle" });
+
+    await expect(manager.setModel(created.id, "no-slash")).rejects.toBeInstanceOf(
+      SessionModelError,
+    );
+    // The stored model is untouched by a failed set.
+    expect((await getSession(store, created.id))?.model).toBe("opencode/big-pickle");
+  });
+
   it("deletes in both the runtime and the store", async () => {
     const store = await freshStore();
     const client = mockClient();

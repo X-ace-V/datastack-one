@@ -248,6 +248,26 @@ export async function renameSession(id: string, title: string): Promise<Session>
   return (await res.json()) as Session;
 }
 
+/**
+ * Set a session's per-session model (V6.1, FR11) via `PATCH /api/sessions/:id`. The picker sends
+ * the chosen `provider/model` ref, or `null` to clear the override back to the platform default.
+ * Returns the updated session row so the caller reflects the persisted value.
+ */
+export async function updateSessionModel(
+  id: string,
+  model: string | null,
+): Promise<Session> {
+  const res = await fetch(`/api/sessions/${id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to update model"));
+  }
+  return (await res.json()) as Session;
+}
+
 /** Delete a session and its entire message history (FR1). Resolves on the 204 No Content. */
 export async function deleteSession(id: string): Promise<void> {
   const res = await fetch(`/api/sessions/${id}`, { method: "DELETE" });

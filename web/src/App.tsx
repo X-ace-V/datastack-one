@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
+import { SessionModelControl } from "./components/SessionModelControl";
 import { DataPanel } from "./components/DataPanel";
 import { ConnectionsPanel } from "./components/ConnectionsPanel";
 import { useEvents } from "./hooks/useEvents";
@@ -38,11 +39,20 @@ export function App() {
         className="flex flex-col overflow-hidden bg-slate-50"
       >
         {store.activeSessionId ? (
-          <ChatPane
-            sessionId={store.activeSessionId}
-            state={store.activeState}
-            appendUserMessage={store.appendUserMessage}
-          />
+          <>
+            <div className="border-b border-slate-200 bg-white px-4 py-2">
+              {/* Per-session model picker (V6.1): reflects and updates the active session's model. */}
+              <SessionModelControl
+                sessionId={store.activeSessionId}
+                disabled={store.activeState.isWorking}
+              />
+            </div>
+            <ChatPane
+              sessionId={store.activeSessionId}
+              state={store.activeState}
+              appendUserMessage={store.appendUserMessage}
+            />
+          </>
         ) : (
           <div className="flex flex-1 items-center justify-center px-6 text-sm text-slate-400">
             Start a session to chat with the agent
