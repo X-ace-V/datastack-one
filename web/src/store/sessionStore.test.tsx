@@ -117,7 +117,12 @@ describe("reduce — tool calls", () => {
       ev({ ...base, status: "pending" }),
       ev({ kind: "text", sessionID: SID, messageID: "m1", partID: "t1", text: "running it" }),
       ev({ ...base, status: "running", title: "querying" }),
-      ev({ ...base, status: "completed", output: "42 rows" }),
+      ev({
+        ...base,
+        status: "completed",
+        output: "42 rows",
+        metadata: { result: { columns: [], rows: [], rowCount: 0, truncated: false } },
+      }),
     ]);
     const blocks = assistant(s).blocks;
     // The tool stays at index 0 (where it first appeared); the text follows it.
@@ -128,6 +133,10 @@ describe("reduce — tool calls", () => {
       expect(tool.callID).toBe("c1");
       expect(tool.status).toBe("completed");
       expect(tool.output).toBe("42 rows");
+      // The structured metadata (the data-panel payload) is carried through onto the block.
+      expect(tool.metadata).toEqual({
+        result: { columns: [], rows: [], rowCount: 0, truncated: false },
+      });
     }
     expect(text?.kind).toBe("text");
   });

@@ -1,5 +1,6 @@
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
+import { DataPanel } from "./components/DataPanel";
 import { useEvents } from "./hooks/useEvents";
 import { useSessionStore } from "./store/sessionStore";
 
@@ -12,8 +13,8 @@ import { useSessionStore } from "./store/sessionStore";
  * store (V2.1) holds every session's transcript; one SSE subscription (V2.2) folds the whole
  * app's chat stream into it; the sidebar (V2.3) owns the session list and selects the active
  * session; the chat pane (V2.4) renders that session's turns and sends new ones; the data panel
- * (V3.4) fills the right region in a later task. Each region is a landmark with an accessible
- * name so the layout is navigable and testable region by region.
+ * (V3.3) renders the latest `run_query` result in the right region. Each region is a landmark with
+ * an accessible name so the layout is navigable and testable region by region.
  */
 export function App() {
   const store = useSessionStore();
@@ -44,17 +45,7 @@ export function App() {
         )}
       </main>
 
-      <aside
-        aria-label="Data panel"
-        className="flex flex-col border-l border-slate-200 bg-white"
-      >
-        <header className="border-b border-slate-200 px-4 py-3">
-          <h2 className="text-sm font-semibold tracking-tight">Data</h2>
-        </header>
-        <div className="flex flex-1 items-center justify-center px-4 text-sm text-slate-400">
-          Schema, query results, and endpoints appear here
-        </div>
-      </aside>
+      <DataPanel state={store.activeState} />
     </div>
   );
 }

@@ -37,6 +37,7 @@ import {
 import { profileSource } from "./tools/profile.js";
 import { loadCsvRowCount } from "./tools/csv.js";
 import { listSourcesForSession } from "./tools/list-sources.js";
+import { runQuery } from "./tools/query.js";
 import { getSessionSource, registerSessionSource } from "./store/session-sources.js";
 import {
   sourceNameFromFilename,
@@ -46,6 +47,7 @@ import { getSession } from "./store/sessions.js";
 import {
   ListSourcesRequestSchema,
   ProfileSourceRequestSchema,
+  RunQueryRequestSchema,
 } from "./core/tool-io.js";
 import { DEFAULT_ARTIFACTS_DIR, writeArtifact } from "./tools/rules.js";
 import { getLatestArtifactByKind } from "./store/artifacts.js";
@@ -883,6 +885,36 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       return reply.code(422).send({ error: `could not profile source: ${message}` });
     }
     return reply.code(200).send({ source: source.name, profile });
+  });
+
+  // `run_query`: run a model-produced read-only SELECT over DuckDB in the context of a session's
+  // connected sources (each exposed by name, FR5b/FR7) and return the rows for the data panel.
+  // Status map: 503 unwired store, 400 bad body, 422 a query that is not a single read-only SELECT
+  // or that DuckDB could not run (so the agent can revise it), 200 with `{ result }`.
+  app.post("/api/internal/tools/run_query", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    const parsed = RunQueryRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid run_query request", details: parsed.error.issues });
+    }
+
+    let result;
+    try {
+      result = await runQuery(deps.store, {
+        sessionId: parsed.data.sessionID,
+        sql: parsed.data.sql,
+      });
+    } catch (err) {
+      // A non-read-only query, a SQL/parse error, or an unreadable source — report it rather
+      // than 500 so the agent gets the detail and can rewrite the query.
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(422).send({ error: `could not run query: ${message}` });
+    }
+    return reply.code(200).send({ result });
   });
 
   return app;

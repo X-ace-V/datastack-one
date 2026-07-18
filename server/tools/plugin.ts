@@ -81,6 +81,48 @@ interface SourceProfile {
   dateColumns: string[];
 }
 
+/** A column of a `run_query` result. */
+interface QueryColumn {
+  name: string;
+  type: string;
+}
+
+/** The result payload `run_query` returns: columns, rows, and a truncation flag. */
+interface QueryResult {
+  columns: QueryColumn[];
+  rows: Record<string, string | number | boolean | null>[];
+  rowCount: number;
+  truncated: boolean;
+}
+
+/** How many result rows to spell out in the model-facing text before summarizing the rest. */
+const QUERY_PREVIEW_ROWS = 20;
+
+/** Render a query result as a compact, model-readable table (the panel gets the full result). */
+function formatQueryResult(result: QueryResult): string {
+  const header = result.columns.map((c) => c.name).join(" | ");
+  const preview = result.rows.slice(0, QUERY_PREVIEW_ROWS).map((row) =>
+    result.columns
+      .map((c) => {
+        const cell = row[c.name];
+        return cell === null || cell === undefined ? "NULL" : String(cell);
+      })
+      .join(" | "),
+  );
+  const lines = [
+    `${result.rowCount} row${result.rowCount === 1 ? "" : "s"}` +
+      `${result.truncated ? ` (showing the first ${result.rowCount})` : ""}, ` +
+      `${result.columns.length} column${result.columns.length === 1 ? "" : "s"}.`,
+    "",
+    header,
+    ...preview,
+  ];
+  if (result.rows.length > QUERY_PREVIEW_ROWS) {
+    lines.push(`… and ${result.rows.length - QUERY_PREVIEW_ROWS} more row(s).`);
+  }
+  return lines.join("\n");
+}
+
 /** Render a profile as a compact, model-readable summary. */
 function formatProfile(source: string, profile: SourceProfile): string {
   const lines = [
@@ -166,6 +208,42 @@ export const DatastackToolsPlugin: Plugin = async () => {
             title: `Profiled ${payload.source}`,
             output: formatProfile(payload.source, payload.profile),
             metadata: { profile: payload.profile },
+          };
+        },
+      }),
+
+      run_query: tool({
+        description:
+          "Run a read-only SQL SELECT over the connected data and return the rows. Reference a " +
+          "source by the exact name from list_sources (e.g. `SELECT * FROM loans LIMIT 10`); the " +
+          "warehouse's raw/staging/marts tables are queryable by their qualified names too. Only " +
+          "a single SELECT is allowed — no INSERT/UPDATE/CREATE/etc. Use this to answer questions " +
+          "about the data. Read-only; needs no approval.",
+        args: {
+          sql: z
+            .string()
+            .describe("A single read-only SQL SELECT statement to run over the connected sources."),
+        },
+        async execute(args, context) {
+          const { ok, status, body } = await callBackend(
+            "/api/internal/tools/run_query",
+            { sessionID: context.sessionID, sql: args.sql },
+          );
+          if (status === 422) {
+            const detail = (body as { error?: string })?.error ?? "the query could not be run";
+            return `Query failed: ${detail}. Check the SQL and the source names from list_sources.`;
+          }
+          if (!ok) {
+            return `Failed to run the query (status ${status}).`;
+          }
+          const result = (body as { result?: QueryResult })?.result;
+          if (!result) {
+            return "The query returned no result.";
+          }
+          return {
+            title: `${result.rowCount} row${result.rowCount === 1 ? "" : "s"}`,
+            output: formatQueryResult(result),
+            metadata: { result },
           };
         },
       }),

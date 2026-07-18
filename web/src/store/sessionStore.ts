@@ -59,6 +59,8 @@ export interface ToolEvent {
   output?: string;
   error?: string;
   title?: string;
+  /** Structured tool payload for the data panel (e.g. `run_query`'s `{ result }`). */
+  metadata?: Record<string, unknown>;
 }
 export interface IdleEvent {
   kind: "idle";
@@ -112,6 +114,7 @@ export type InlineBlock =
       output?: string;
       error?: string;
       title?: string;
+      metadata?: Record<string, unknown>;
     }
   | {
       kind: "approval";
@@ -347,6 +350,7 @@ export function reduce(state: SessionLiveState, action: StoreAction): SessionLiv
         output: event.output,
         error: event.error,
         title: event.title,
+        metadata: event.metadata,
       };
       return {
         ...state,

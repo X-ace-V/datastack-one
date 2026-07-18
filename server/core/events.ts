@@ -124,6 +124,13 @@ export const ToolEventSchema = z.object({
   error: z.string().optional(),
   /** A short human-readable title the runtime attaches while running/after completion. */
   title: z.string().optional(),
+  /**
+   * The tool's structured metadata, once available (running/completed/error). This carries the
+   * data-panel payload a tool attaches beside its text output — e.g. `run_query`'s
+   * `{ result: { columns, rows, … } }` (FR7/FR12) — so the panel renders the real table rather
+   * than parsing the model-facing text. Never carries a path or credential (FR5b).
+   */
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 export type ToolEvent = z.infer<typeof ToolEventSchema>;
 

@@ -177,4 +177,74 @@ describe("internal tool routes", () => {
     });
     expect(b.statusCode).toBe(503);
   });
+
+  it("run_query runs a read-only SELECT over a named source and returns rows (FR7)", async () => {
+    const { app, store } = await fixtures();
+    const path = await csvFile("loans.csv", LOANS_CSV);
+    await registerSessionSource(store, { sessionId: "ses_1", name: "loans", path });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/tools/run_query",
+      payload: {
+        sessionID: "ses_1",
+        sql: "SELECT branch, SUM(COALESCE(balance,0)) AS total FROM loans GROUP BY branch",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const { result } = res.json();
+    expect(result.columns.map((c: { name: string }) => c.name)).toEqual(["branch", "total"]);
+    const byBranch = new Map<string, number>(
+      result.rows.map((r: { branch: string; total: number }) => [r.branch, r.total]),
+    );
+    // Two north loans (1000.50 + 750.25), a single south loan whose null balance coalesces to 0.
+    expect(byBranch.get("north")).toBe(1750.75);
+    expect(byBranch.get("south")).toBe(0);
+    expect(byBranch.get("west")).toBe(500);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("run_query 422s a non-read-only query without touching data", async () => {
+    const { app, store } = await fixtures();
+    const path = await csvFile("loans.csv", LOANS_CSV);
+    await registerSessionSource(store, { sessionId: "ses_1", name: "loans", path });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/tools/run_query",
+      payload: { sessionID: "ses_1", sql: "DROP TABLE loans" },
+    });
+    expect(res.statusCode).toBe(422);
+  });
+
+  it("run_query 422s a SQL error (unknown column) so the agent can revise", async () => {
+    const { app, store } = await fixtures();
+    const path = await csvFile("loans.csv", LOANS_CSV);
+    await registerSessionSource(store, { sessionId: "ses_1", name: "loans", path });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/internal/tools/run_query",
+      payload: { sessionID: "ses_1", sql: "SELECT nope FROM loans" },
+    });
+    expect(res.statusCode).toBe(422);
+  });
+
+  it("run_query 400s a malformed body and 503s when unwired", async () => {
+    const { app } = await fixtures();
+    const bad = await app.inject({
+      method: "POST",
+      url: "/api/internal/tools/run_query",
+      payload: { sessionID: "ses_1" },
+    });
+    expect(bad.statusCode).toBe(400);
+
+    const unwired = await buildServer({}).inject({
+      method: "POST",
+      url: "/api/internal/tools/run_query",
+      payload: { sessionID: "ses_1", sql: "SELECT 1" },
+    });
+    expect(unwired.statusCode).toBe(503);
+  });
 });

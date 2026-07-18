@@ -77,6 +77,9 @@ function normalizePart(part: Part): NormalizedEvent | null {
           state.status === "running" || state.status === "completed"
             ? state.title
             : undefined,
+        // Structured tool metadata (the data-panel payload) is present once the tool starts
+        // producing it — running/completed/error carry it, a still-pending call does not.
+        metadata: state.status === "pending" ? undefined : state.metadata,
       };
     }
     // file / step-start / step-finish / snapshot / agent / patch parts are not chat content.

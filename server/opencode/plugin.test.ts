@@ -51,15 +51,17 @@ describe("data-tools plugin", () => {
     tools: Record<string, ToolDefinition>;
     list_sources: ToolDefinition;
     profile_source: ToolDefinition;
+    run_query: ToolDefinition;
   }> {
     const hooks = await DatastackToolsPlugin({} as unknown as PluginInput);
     const tools = (hooks.tool ?? {}) as Record<string, ToolDefinition>;
     const list_sources = tools.list_sources;
     const profile_source = tools.profile_source;
-    if (!list_sources || !profile_source) {
+    const run_query = tools.run_query;
+    if (!list_sources || !profile_source || !run_query) {
       throw new Error("plugin did not register the expected tools");
     }
-    return { tools, list_sources, profile_source };
+    return { tools, list_sources, profile_source, run_query };
   }
 
   /** A fake ToolContext carrying just the session id the tools read. */
@@ -77,14 +79,16 @@ describe("data-tools plugin", () => {
     return { store, close: () => app.close() };
   }
 
-  it("registers list_sources and profile_source with descriptions and args", async () => {
-    const { tools, list_sources, profile_source } = await instantiate();
-    expect(Object.keys(tools).sort()).toEqual(["list_sources", "profile_source"]);
+  it("registers list_sources, profile_source and run_query with descriptions and args", async () => {
+    const { tools, list_sources, profile_source, run_query } = await instantiate();
+    expect(Object.keys(tools).sort()).toEqual(["list_sources", "profile_source", "run_query"]);
     expect(list_sources.description).toMatch(/list the data sources/i);
     expect(profile_source.description).toMatch(/profile/i);
-    // profile_source takes a `source` name; list_sources takes no args.
+    expect(run_query.description).toMatch(/read-only sql select/i);
+    // profile_source takes a `source` name; list_sources takes no args; run_query takes `sql`.
     expect(Object.keys(profile_source.args)).toEqual(["source"]);
     expect(Object.keys(list_sources.args)).toEqual([]);
+    expect(Object.keys(run_query.args)).toEqual(["sql"]);
   });
 
   it("list_sources returns a formatted list via the real loopback", async () => {
@@ -147,6 +151,45 @@ describe("data-tools plugin", () => {
       const result = await profile_source.execute({ source: "ghost" }, ctx("ses_1"));
       expect(result).toContain('No source named "ghost"');
       expect(result).toContain("list_sources");
+    } finally {
+      await close();
+    }
+  });
+
+  it("run_query returns the structured result + a readable table via the real loopback", async () => {
+    const { store, close } = await backend();
+    try {
+      const path = await csvFile("loans.csv", LOANS_CSV);
+      await registerSessionSource(store, { sessionId: "ses_1", name: "loans", path });
+      const { run_query } = await instantiate();
+      const result = await run_query.execute(
+        { sql: "SELECT branch, SUM(COALESCE(balance,0)) AS total FROM loans GROUP BY branch" },
+        ctx("ses_1"),
+      );
+      expect(typeof result).not.toBe("string");
+      const structured = result as {
+        output: string;
+        metadata: { result: { columns: { name: string }[]; rows: unknown[] } };
+      };
+      // The panel payload carries the real columns/rows; the model-facing output is a readable table.
+      expect(structured.metadata.result.columns.map((c) => c.name)).toEqual(["branch", "total"]);
+      expect(structured.metadata.result.rows).toHaveLength(3);
+      expect(structured.output).toContain("branch | total");
+      expect(structured.output).toContain("north");
+    } finally {
+      await close();
+    }
+  });
+
+  it("run_query reports a rejected non-read-only query in words the agent can act on", async () => {
+    const { store, close } = await backend();
+    try {
+      const path = await csvFile("loans.csv", LOANS_CSV);
+      await registerSessionSource(store, { sessionId: "ses_1", name: "loans", path });
+      const { run_query } = await instantiate();
+      const result = await run_query.execute({ sql: "DROP TABLE loans" }, ctx("ses_1"));
+      expect(typeof result).toBe("string");
+      expect(result as string).toContain("Query failed");
     } finally {
       await close();
     }

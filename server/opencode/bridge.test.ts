@@ -189,6 +189,33 @@ describe("normalizeEvent", () => {
     expect((normalized as { error?: string }).error).toBeUndefined();
   });
 
+  it("carries a completed tool's structured metadata (the data-panel payload, FR7)", () => {
+    const result = {
+      columns: [{ name: "branch", type: "VARCHAR" }],
+      rows: [{ branch: "north" }],
+      rowCount: 1,
+      truncated: false,
+    };
+    const event = partEvent({
+      id: "prt_q",
+      sessionID: "ses_1",
+      messageID: "msg_1",
+      type: "tool",
+      callID: "call_q",
+      tool: "run_query",
+      state: {
+        status: "completed",
+        input: { sql: "SELECT branch FROM loans" },
+        output: "1 row",
+        title: "1 row",
+        metadata: { result },
+        time: { start: 1, end: 2 },
+      },
+    });
+    const normalized = normalizeEvent(event);
+    expect((normalized as { metadata?: unknown }).metadata).toEqual({ result });
+  });
+
   it("maps an errored tool part carrying the error detail", () => {
     const event = partEvent({
       id: "prt_t",

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ListedSourceSchema } from "./session-sources.js";
 import { SourceProfileSchema } from "./profile.js";
+import { QueryResultSchema } from "./query.js";
 
 /**
  * Pure request/response contracts for the internal loopback the agent tools call
@@ -40,3 +41,21 @@ export const ProfileSourceResponseSchema = z.object({
   profile: SourceProfileSchema,
 });
 export type ProfileSourceResponse = z.infer<typeof ProfileSourceResponseSchema>;
+
+/**
+ * `run_query` request: run a read-only `SELECT` in the context of a session's connected sources.
+ * Only the session id and the model-produced SQL cross the boundary — the SQL references sources
+ * by their **name** (FR5b), and the backend resolves each name to its on-disk path when it exposes
+ * the source to the query.
+ */
+export const RunQueryRequestSchema = z.object({
+  sessionID: z.string().min(1),
+  sql: z.string().min(1),
+});
+export type RunQueryRequest = z.infer<typeof RunQueryRequestSchema>;
+
+/** `run_query` response: the query result (columns + rows) for the data panel. */
+export const RunQueryResponseSchema = z.object({
+  result: QueryResultSchema,
+});
+export type RunQueryResponse = z.infer<typeof RunQueryResponseSchema>;
