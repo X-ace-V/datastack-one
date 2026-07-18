@@ -1,16 +1,21 @@
 import { ResultTable } from "./ResultTable";
+import { SchemaTable } from "./SchemaTable";
 import { latestQueryResult } from "../lib/query";
+import { latestProfile } from "../lib/profile";
 import type { SessionLiveState } from "../store/sessionStore";
 
 /**
  * The right-hand data panel of the shell (ARCHITECTURE §4) — the "computer" view beside the chat.
- * As of V3.3 it renders the latest `run_query` result: the agent answers an NL question with SQL,
- * the result rides the tool event into the store, and {@link latestQueryResult} pulls it back out
- * so the table shows here (PRD FR7/FR12). The schema view and published endpoints fill in beside it
- * in later tasks (V3.4+); until a query has run, the panel shows its placeholder.
+ * It renders the agent's read-tool output *from the live chat stream*: `profile_source` attaches a
+ * schema profile and `run_query` a result table to their tool-call `metadata`, which rides the SSE
+ * tool event into the store; {@link latestProfile}/{@link latestQueryResult} pull the latest of each
+ * back out (PRD FR6/FR7/FR12). The schema shows above the most recent query result; until either has
+ * run, the panel shows its placeholder. Published endpoints join them in a later task.
  */
 export function DataPanel({ state }: { state: SessionLiveState }) {
+  const profile = latestProfile(state.messages);
   const result = latestQueryResult(state.messages);
+  const hasContent = profile !== null || result !== null;
 
   return (
     <aside
@@ -20,12 +25,24 @@ export function DataPanel({ state }: { state: SessionLiveState }) {
       <header className="border-b border-slate-200 px-4 py-3">
         <h2 className="text-sm font-semibold tracking-tight">Data</h2>
       </header>
-      {result ? (
-        <div className="flex-1 overflow-auto p-4">
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Query result
-          </h3>
-          <ResultTable result={result} />
+      {hasContent ? (
+        <div className="flex-1 space-y-6 overflow-auto p-4">
+          {profile && (
+            <section>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Schema
+              </h3>
+              <SchemaTable profile={profile} />
+            </section>
+          )}
+          {result && (
+            <section>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Query result
+              </h3>
+              <ResultTable result={result} />
+            </section>
+          )}
         </div>
       ) : (
         <div className="flex flex-1 items-center justify-center px-4 text-center text-sm text-slate-400">
