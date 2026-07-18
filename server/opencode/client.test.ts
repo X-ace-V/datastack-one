@@ -1,5 +1,34 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDatastackOpencode, type DatastackOpencode } from "./client.js";
+import {
+  createDatastackOpencode,
+  withDatastackPlugins,
+  DATASTACK_PLUGIN_URL,
+  type DatastackOpencode,
+} from "./client.js";
+
+/**
+ * Pure wiring tests for the data-tools plugin registration (V3.1). No `opencode` boot needed —
+ * these assert the config the runtime is given carries the plugin so the agent's tools load.
+ */
+describe("data-tools plugin wiring", () => {
+  it("points the plugin URL at server/tools/plugin.ts as a file URL", () => {
+    expect(DATASTACK_PLUGIN_URL).toMatch(/^file:\/\//);
+    expect(DATASTACK_PLUGIN_URL).toMatch(/\/tools\/plugin\.ts$/);
+  });
+
+  it("prepends the plugin to the runtime config, keeping any caller plugins", () => {
+    expect(withDatastackPlugins({}).plugin).toEqual([DATASTACK_PLUGIN_URL]);
+    expect(withDatastackPlugins({ plugin: ["other-plugin"] }).plugin).toEqual([
+      DATASTACK_PLUGIN_URL,
+      "other-plugin",
+    ]);
+  });
+
+  it("preserves the rest of the config untouched", () => {
+    const merged = withDatastackPlugins({ model: "opencode/big-pickle" });
+    expect(merged.model).toBe("opencode/big-pickle");
+  });
+});
 
 /**
  * Boot + health test for the OpenCode runtime (T1.1). This actually spawns the

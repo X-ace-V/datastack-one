@@ -1,5 +1,22 @@
-import { createOpencode, type OpencodeClient, type ServerOptions } from "@opencode-ai/sdk";
+import { createOpencode, type OpencodeClient, type ServerOptions, type Config } from "@opencode-ai/sdk";
 import { buildOpencodeConfig } from "./config.js";
+
+/**
+ * File URL of the DataStack One data-tools plugin (V3.1). OpenCode loads plugins by URL into
+ * its own runtime; this points at `server/tools/plugin.ts`, resolved relative to this module so
+ * it is correct under `tsx`/vitest (where modules run from source). The plugin is self-contained
+ * and reaches this backend over loopback — see {@link file://../tools/plugin.ts}.
+ */
+export const DATASTACK_PLUGIN_URL = new URL("../tools/plugin.ts", import.meta.url).href;
+
+/**
+ * Merge the DataStack One tools plugin into a runtime {@link Config} (ARCHITECTURE §3.4).
+ * The plugin is prepended so it always loads; any plugins the caller already listed are kept.
+ * Pure so the wiring can be asserted without spawning the `opencode` server.
+ */
+export function withDatastackPlugins(config: Config): Config {
+  return { ...config, plugin: [DATASTACK_PLUGIN_URL, ...(config.plugin ?? [])] };
+}
 
 /**
  * Boots the in-process OpenCode server that drives the agent runtime and returns a
@@ -40,7 +57,7 @@ export async function createDatastackOpencode(
   const { client, server } = await createOpencode({
     ...serverOptions,
     timeout: timeout ?? DEFAULT_BOOT_TIMEOUT_MS,
-    config: buildOpencodeConfig(config),
+    config: withDatastackPlugins(buildOpencodeConfig(config)),
   });
   return {
     client,

@@ -35,6 +35,12 @@ import {
   readServedData,
 } from "./serving/reader.js";
 import { profileSource } from "./tools/profile.js";
+import { listSourcesForSession } from "./tools/list-sources.js";
+import { getSessionSource } from "./store/session-sources.js";
+import {
+  ListSourcesRequestSchema,
+  ProfileSourceRequestSchema,
+} from "./core/tool-io.js";
 import { DEFAULT_ARTIFACTS_DIR, writeArtifact } from "./tools/rules.js";
 import { getLatestArtifactByKind } from "./store/artifacts.js";
 import { DEFAULT_UPLOADS_DIR, saveUpload } from "./store/uploads.js";
@@ -741,6 +747,63 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       }
     },
   );
+
+  // FR4/FR6: internal loopback the agent's data tools call (ARCHITECTURE §3.4). The tools run
+  // inside OpenCode's own runtime — a separate process with no access to this DuckDB store — so
+  // each `execute()` POSTs here and this backend does the store work. These routes are for the
+  // in-process plugin only (the app binds to 127.0.0.1); they take a session id + a source
+  // **name** and never a raw path/credential, and never return one either (FR5b).
+
+  // `list_sources`: the sources connected to a session, as model-safe views (name + kind +
+  // row count, no paths). Status map: 503 unwired store, 400 bad body, 200 with the list.
+  app.post("/api/internal/tools/list_sources", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    const parsed = ListSourcesRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid list_sources request", details: parsed.error.issues });
+    }
+    const sources = await listSourcesForSession(deps.store, parsed.data.sessionID);
+    return reply.code(200).send({ sources });
+  });
+
+  // `profile_source`: profile a named source connected to a session (schema, types, row count,
+  // null %, candidate keys, date cols). Resolves the name → path backend-side, then runs the
+  // read-only profiler. Status map: 503 unwired store, 400 bad body, 404 no source of that name
+  // in the session, 422 unreadable CSV, 200 with `{ source, profile }`.
+  app.post("/api/internal/tools/profile_source", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    const parsed = ProfileSourceRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid profile_source request", details: parsed.error.issues });
+    }
+
+    const source = await getSessionSource(
+      deps.store,
+      parsed.data.sessionID,
+      parsed.data.source,
+    );
+    if (!source) {
+      return reply.code(404).send({ error: "source not found" });
+    }
+
+    let profile;
+    try {
+      profile = await profileSource(deps.store, source.path);
+    } catch (err) {
+      // read_csv_auto failed (missing file, unreadable CSV) — report it rather than 500.
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(422).send({ error: `could not profile source: ${message}` });
+    }
+    return reply.code(200).send({ source: source.name, profile });
+  });
 
   return app;
 }

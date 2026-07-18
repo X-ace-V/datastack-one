@@ -97,6 +97,12 @@ conversational shell also needs are not built yet.
 | `POST /api/approvals/:requestID` | Answer an OpenCode permission request (FR10). |
 | `GET /api/projects/:id/served` | Endpoints this project has published. |
 | `GET /api/serve/:name` · `GET /api/serve/:name.csv` | The generated endpoint: JSON preview / CSV download (FR11). |
+| `POST /api/internal/tools/list_sources` · `POST /api/internal/tools/profile_source` | Loopback the agent's data-tools plugin calls; session-scoped, name-only (FR4/FR6). |
+
+The `internal/tools/*` routes are the loopback the in-process OpenCode plugin
+(`server/tools/plugin.ts`) calls — the agent's tools run in a separate runtime with no
+direct store access, so they reach the store through these. They take a session id and a
+source **name** and never a raw path or credential (FR5b).
 
 ---
 

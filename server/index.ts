@@ -14,6 +14,10 @@ async function main(): Promise<void> {
   // Open (and migrate) the metadata store so the project routes can persist to the
   // `platform` schema the moment HTTP starts accepting requests.
   const store = await openStore();
+  // Tell the agent-tools plugin (loaded into the OpenCode subprocess below) how to reach this
+  // backend over loopback. The subprocess inherits this backend's env at spawn, so it must be
+  // set BEFORE createDatastackOpencode. See server/tools/plugin.ts (ARCHITECTURE §3.4).
+  process.env.DATASTACK_INTERNAL_URL ??= `http://${HOST}:${PORT}`;
   // Spawn the in-process OpenCode server first so its client is available to the
   // routes (e.g. `GET /api/models`) the moment HTTP starts accepting requests.
   const runtime = await createDatastackOpencode({ hostname: "127.0.0.1" });

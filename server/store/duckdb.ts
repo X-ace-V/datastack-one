@@ -38,6 +38,7 @@ export const PLATFORM_TABLES = [
   "sessions",
   "messages",
   "lineage",
+  "session_sources",
   "projects",
   "sources",
   "runs",
@@ -106,6 +107,22 @@ const MIGRATION_STATEMENTS: readonly string[] = [
      status     VARCHAR,
      detail     VARCHAR,
      created_at TIMESTAMP NOT NULL DEFAULT now()
+   );`,
+
+  // FR4 — the per-session data-source registry the agent tools read (V3.1). Distinct from
+  // the project-scoped `platform.sources` (v1): a conversational session owns its own sources,
+  // and the agent references each by `name` only — the raw `path` is resolved backend-side and
+  // never handed to the model (FR5b). Keyed by (session_id, name) so a re-registration under
+  // the same name in a session replaces the row (upsert). `row_count` is NULL until profiled.
+  // The upload route (V3.2) writes here; `list_sources`/`profile_source` read here.
+  `CREATE TABLE IF NOT EXISTS platform.session_sources (
+     session_id VARCHAR NOT NULL,
+     name       VARCHAR NOT NULL,
+     kind       VARCHAR NOT NULL DEFAULT 'csv',
+     path       VARCHAR NOT NULL,
+     row_count  BIGINT,
+     created_at TIMESTAMP NOT NULL DEFAULT now(),
+     PRIMARY KEY (session_id, name)
    );`,
 
   // FR1 — projects created by the wizard's first step.

@@ -33,6 +33,7 @@
   "dependencies": {
     "@duckdb/node-api": "^1.5.4-r.1",
     "@fastify/multipart": "^9.4.0",
+    "@opencode-ai/plugin": "^1.18.3",
     "@opencode-ai/sdk": "^1.18.3",
     "fastify": "^5.10.0",
     "opencode-ai": "^1.18.3",
