@@ -203,3 +203,103 @@ describe("App chat flow (V2.4)", () => {
     await waitFor(() => expect(screen.getByText("There are 4 branches.")).toBeTruthy());
   });
 });
+
+describe("App session reopen (V6.2)", () => {
+  const SESSION = {
+    id: "ses_1",
+    title: "Loan review",
+    model: "opencode/big-pickle" as string | null,
+    createdAt: "2026-07-17T10:00:00Z",
+    updatedAt: "2026-07-17T10:00:00Z",
+  };
+
+  const CATALOG = {
+    default: "opencode/big-pickle",
+    providers: [
+      {
+        id: "opencode",
+        name: "OpenCode Zen",
+        source: "custom",
+        models: [
+          {
+            ref: "opencode/big-pickle",
+            providerID: "opencode",
+            modelID: "big-pickle",
+            name: "Big Pickle",
+            toolcall: true,
+            reasoning: true,
+            cost: { input: 0, output: 0 },
+            free: true,
+          },
+        ],
+      },
+    ],
+  };
+
+  // The persisted transcript a reopen fetches: a user prompt and an assistant turn whose
+  // tool-block history includes a run_query card — the shape V6.2 must reconstruct.
+  const HISTORY = [
+    { role: "user", id: "u1", content: "which branch has the most loans?", seq: 0 },
+    {
+      role: "assistant",
+      id: "a1",
+      seq: 1,
+      content: "The north branch, with 12 loans.",
+      blocks: [
+        { kind: "reasoning", partID: "r1", text: "I will query the loans." },
+        {
+          kind: "tool",
+          callID: "c1",
+          tool: "run_query",
+          status: "completed",
+          input: { sql: "SELECT branch, count(*) FROM loans GROUP BY branch" },
+          output: "north 12",
+        },
+        { kind: "text", partID: "p1", text: "The north branch, with 12 loans." },
+      ],
+    },
+  ];
+
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/api/models")) {
+          return { ok: true, status: 200, json: async () => CATALOG };
+        }
+        // The reopen fetch — return the session WITH its persisted transcript.
+        if (/\/api\/sessions\/ses_1$/.test(String(url))) {
+          return { ok: true, status: 200, json: async () => ({ ...SESSION, messages: HISTORY }) };
+        }
+        if (String(url).includes("/lineage")) {
+          return { ok: true, status: 200, json: async () => ({ lineage: [] }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ sessions: [SESSION] }) };
+      }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("rehydrates a session's messages and tool-block history when reopened", async () => {
+    render(<App />);
+
+    const sessionButton = await screen.findByRole("button", { name: "Loan review" });
+    await act(async () => {
+      fireEvent.click(sessionButton);
+    });
+
+    // The persisted user prompt and assistant answer reconstruct into the transcript…
+    await waitFor(() =>
+      expect(screen.getByText("which branch has the most loans?")).toBeTruthy(),
+    );
+    expect(screen.getByText("The north branch, with 12 loans.")).toBeTruthy();
+    // …and the assistant turn's tool card (its tool-block history) is rendered, not just text.
+    await waitFor(() => expect(screen.getByText(/run_query/)).toBeTruthy());
+  });
+});

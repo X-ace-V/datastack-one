@@ -6,6 +6,7 @@ import { createEventHub } from "./opencode/hub.js";
 import { createApprovalGate } from "./opencode/approvals.js";
 import { createToolApprovalGate } from "./opencode/tool-approvals.js";
 import { createSessionDqGate } from "./opencode/session-dq.js";
+import { createTranscriptPersister } from "./opencode/transcript.js";
 import { SessionManager } from "./opencode/sessions.js";
 import { testConnection } from "./connections/postgres.js";
 import { attachPostgres } from "./connections/attach.js";
@@ -28,10 +29,19 @@ async function main(): Promise<void> {
   // Capture permission requests into the approval gate (FR10). It is fed from the event
   // bridge's single pump below, so the runtime's event stream is read exactly once.
   const approvals = createApprovalGate(runtime.client);
-  // Pump the runtime's event stream once: raw events feed the permission gate, while the
-  // bridge fans normalized chat events (text/reasoning/tool/idle/error) to its subscribers.
+  // Persist each assistant turn's blocks to `platform.messages` when the turn goes idle (V6.2),
+  // so reopening a session reconstructs its full transcript. Fed off the same raw pump below.
+  const transcript = createTranscriptPersister(store, {
+    onError: (error) => console.error("transcript persist error:", error),
+  });
+  // Pump the runtime's event stream once: raw events feed the permission gate and the transcript
+  // persister, while the bridge fans normalized chat events (text/reasoning/tool/idle/error) to
+  // its subscribers.
   const bridge = createEventBridge(runtime.client, {
-    onRawEvent: (event) => approvals.ingest(event),
+    onRawEvent: (event) => {
+      approvals.ingest(event);
+      transcript.ingest(event);
+    },
     onError: (error) => console.error("event bridge error:", error),
   });
   // Sequence the normalized stream into a per-session, replayable SSE fan-out (FR3) that the

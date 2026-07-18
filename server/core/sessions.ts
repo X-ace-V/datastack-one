@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PersistedBlockSchema } from "./transcript.js";
 
 /**
  * Pure session contract (PRD FR1, v2 conversational agent). A session is one chat with
@@ -129,6 +130,13 @@ export const MessageSchema = z.object({
   role: z.enum(MESSAGE_ROLES),
   content: z.string(),
   createdAt: z.string().min(1),
+  /**
+   * The ordered rendered blocks of an assistant turn — its streamed text, reasoning, and tool
+   * cards (V6.2, FR1) — so reopening a session reconstructs the tool-block history, not just the
+   * plain `content`. Absent on a user message (its `content` is the whole message) and omitted
+   * on an assistant row persisted before V6.2. See {@link file://./transcript.ts}.
+   */
+  blocks: z.array(PersistedBlockSchema).optional(),
 });
 export type Message = z.infer<typeof MessageSchema>;
 

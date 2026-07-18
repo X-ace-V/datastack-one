@@ -7,9 +7,11 @@ import {
   insertSession,
   listMessages,
   listSessions,
+  persistAssistantMessage,
   renameSession,
   updateSessionModel,
 } from "./sessions.js";
+import type { PersistedBlock } from "../core/transcript.js";
 
 /**
  * Unit tests for the session store (V1.1, FR1). They assert the desired persisted *values*
@@ -143,6 +145,83 @@ describe("session store", () => {
     expect((await listMessages(store, "s2")).map((m) => m.content)).toEqual([
       "other",
     ]);
+  });
+
+  it("persists an assistant turn with its ordered tool-block history (V6.2)", async () => {
+    const store = await freshStore();
+    await insertSession(store, { id: "s1", title: "Build" });
+    // The user's prompt is persisted first (by the chat turn), so the reply replays after it.
+    await appendMessage(store, { sessionId: "s1", role: "user", content: "which branch?" });
+
+    const blocks: PersistedBlock[] = [
+      { kind: "reasoning", partID: "r1", text: "I should query the data." },
+      {
+        kind: "tool",
+        callID: "c1",
+        tool: "run_query",
+        status: "completed",
+        input: { sql: "SELECT branch FROM loans" },
+        output: "north",
+        metadata: { result: { columns: ["branch"], rows: [["north"]] } },
+      },
+      { kind: "text", partID: "p1", text: "The north branch." },
+    ];
+    const msg = await persistAssistantMessage(store, {
+      sessionId: "s1",
+      messageID: "asst_1",
+      content: "The north branch.",
+      blocks,
+    });
+
+    // The OpenCode messageID is the row id; seq follows the user prompt; blocks round-trip.
+    expect(msg.id).toBe("asst_1");
+    expect(msg.seq).toBe(1);
+    expect(msg.role).toBe("assistant");
+    expect(msg.content).toBe("The north branch.");
+    expect(msg.blocks).toEqual(blocks);
+
+    // Reopening the session replays user text + the assistant turn WITH its tool blocks.
+    const history = await listMessages(store, "s1");
+    expect(history.map((m) => [m.seq, m.role])).toEqual([
+      [0, "user"],
+      [1, "assistant"],
+    ]);
+    expect(history[1]?.blocks).toEqual(blocks);
+    // The user message carries no blocks.
+    expect(history[0]?.blocks).toBeUndefined();
+  });
+
+  it("upserts an assistant turn by messageID without duplicating or re-seq-ing it", async () => {
+    const store = await freshStore();
+    await insertSession(store, { id: "s1", title: "Build" });
+    await appendMessage(store, { sessionId: "s1", role: "user", content: "hi" });
+
+    const first = await persistAssistantMessage(store, {
+      sessionId: "s1",
+      messageID: "asst_1",
+      content: "Working…",
+      blocks: [{ kind: "text", partID: "p1", text: "Working…" }],
+    });
+    expect(first.seq).toBe(1);
+
+    // A second flush of the same turn (e.g. a repeated idle) replaces content/blocks, keeps seq.
+    const updatedBlocks: PersistedBlock[] = [
+      { kind: "text", partID: "p1", text: "Done: 4 branches." },
+    ];
+    const second = await persistAssistantMessage(store, {
+      sessionId: "s1",
+      messageID: "asst_1",
+      content: "Done: 4 branches.",
+      blocks: updatedBlocks,
+    });
+    expect(second.id).toBe("asst_1");
+    expect(second.seq).toBe(1);
+    expect(second.content).toBe("Done: 4 branches.");
+
+    // Exactly one assistant row survives — the upsert did not append a second.
+    const history = await listMessages(store, "s1");
+    expect(history.filter((m) => m.role === "assistant")).toHaveLength(1);
+    expect(history[1]?.blocks).toEqual(updatedBlocks);
   });
 
   it("deletes a session and its history, reporting whether it existed", async () => {

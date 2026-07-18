@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { SessionModelControl } from "./components/SessionModelControl";
@@ -6,6 +6,7 @@ import { DataPanel } from "./components/DataPanel";
 import { ConnectionsPanel } from "./components/ConnectionsPanel";
 import { useEvents } from "./hooks/useEvents";
 import { useSessionStore } from "./store/sessionStore";
+import { getSession } from "./lib/api";
 
 /**
  * Application root — the frame the conversational shell renders inside: a session sidebar
@@ -25,6 +26,39 @@ export function App() {
   useEvents({ onEvent: store.handleEvent });
   // Settings → Connections opens as a modal overlay above the conversation (V5.3), not a route.
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Reopen (V6.2, FR1): when a session becomes active with no live state (a fresh page load, or
+  // one created in a prior server run), fetch its persisted history and reconstruct the transcript
+  // — messages AND their tool-block history. `hydrateSession` no-ops if the session already has
+  // streamed content, so a slow fetch can never clobber an in-flight conversation.
+  const { activeSessionId, getState, hydrateSession } = store;
+  useEffect(() => {
+    if (!activeSessionId) return;
+    const existing = getState(activeSessionId);
+    if (existing && (existing.messages.length > 0 || existing.isWorking)) return;
+    let active = true;
+    getSession(activeSessionId)
+      .then((session) => {
+        if (!active) return;
+        hydrateSession(
+          activeSessionId,
+          session.messages
+            .filter((m) => m.role === "user" || m.role === "assistant")
+            .map((m) => ({
+              role: m.role as "user" | "assistant",
+              id: m.id,
+              content: m.content,
+              blocks: m.blocks,
+            })),
+        );
+      })
+      .catch(() => {
+        // A failed reopen fetch leaves the session empty; the user can retry by reselecting it.
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeSessionId, getState, hydrateSession]);
 
   return (
     <div className="relative grid h-screen grid-cols-[16rem_1fr_22rem] bg-slate-50 text-slate-900">

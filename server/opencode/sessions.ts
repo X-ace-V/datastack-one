@@ -170,9 +170,10 @@ export class SessionManager {
 
   /**
    * Append a message to a session's persisted transcript (FR1 history). The chat turn (V1.3)
-   * records the user's prompt here, and the bridge (V1.4) records the assistant's reply, so
-   * reopening the session replays the conversation. `seq`/`updated_at` are handled by the
-   * store.
+   * records the user's prompt here; the assistant's reply (its text + tool-block history) is
+   * persisted separately by the transcript persister (V6.2,
+   * {@link file://./transcript.ts}) when the turn goes idle, so reopening the session replays
+   * the whole conversation. `seq`/`updated_at` are handled by the store.
    */
   async appendMessage(
     sessionId: string,

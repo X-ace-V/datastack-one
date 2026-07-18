@@ -7,6 +7,8 @@ import {
   SessionSchema,
   SessionWithHistorySchema,
 } from "./core/sessions.js";
+import { persistAssistantMessage } from "./store/sessions.js";
+import type { PersistedBlock } from "./core/transcript.js";
 
 /**
  * Route tests for `POST/GET/PATCH/DELETE /api/sessions` and `GET /api/sessions/:id` (V1.2,
@@ -172,6 +174,51 @@ describe("session routes", () => {
       [0, "user", "profile this"],
       [1, "assistant", "here is the profile"],
     ]);
+  });
+
+  it("reconstructs an assistant turn's tool-block history on reopen (V6.2)", async () => {
+    const client = mockClient();
+    const store = await openStore(":memory:");
+    open.push(store);
+    const manager = new SessionManager(client, store);
+    const app = buildServer({ sessions: manager });
+
+    const created = SessionSchema.parse(
+      (await app.inject({ method: "POST", url: "/api/sessions", payload: {} })).json(),
+    );
+    await manager.appendMessage(created.id, "user", "which branch?");
+    // The transcript persister (V6.2) writes the assistant turn's blocks at idle; seed one.
+    const blocks: PersistedBlock[] = [
+      { kind: "reasoning", partID: "r1", text: "I'll query it." },
+      {
+        kind: "tool",
+        callID: "c1",
+        tool: "run_query",
+        status: "completed",
+        input: { sql: "SELECT branch FROM loans" },
+        output: "north",
+        metadata: { result: { columns: ["branch"], rows: [["north"]] } },
+      },
+      { kind: "text", partID: "p1", text: "The north branch." },
+    ];
+    await persistAssistantMessage(store, {
+      sessionId: created.id,
+      messageID: "asst_1",
+      content: "The north branch.",
+      blocks,
+    });
+
+    const res = await app.inject({ method: "GET", url: `/api/sessions/${created.id}` });
+    expect(res.statusCode).toBe(200);
+    const session = SessionWithHistorySchema.parse(res.json());
+    expect(session.messages.map((m) => [m.seq, m.role])).toEqual([
+      [0, "user"],
+      [1, "assistant"],
+    ]);
+    // The reopen carries the full tool-block history, not just the plain text.
+    expect(session.messages[1]?.blocks).toEqual(blocks);
+    // The user turn carries no blocks.
+    expect(session.messages[0]?.blocks).toBeUndefined();
   });
 
   it("returns 404 for an unknown session id", async () => {

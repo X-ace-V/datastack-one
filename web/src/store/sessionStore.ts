@@ -180,10 +180,27 @@ export function createEmptySessionState(): SessionLiveState {
 
 // --- Pure reducer ---
 
-/** The actions the store folds over: a normalized SSE event, or an imperative user turn. */
+/**
+ * One persisted message as `GET /api/sessions/:id` returns it (V6.2) — the shape a reopen
+ * hydrates from. `blocks` carries an assistant turn's rendered tool-block history; a user turn
+ * carries only its `content`. Mirrors the backend `MessageSchema`; the persisted block kinds
+ * are exactly the store's `InlineBlock` minus the transient `approval` pill.
+ */
+export interface PersistedMessage {
+  role: "user" | "assistant";
+  id: string;
+  content: string;
+  blocks?: Array<Exclude<InlineBlock, { kind: "approval" }>>;
+}
+
+/**
+ * The actions the store folds over: a normalized SSE event, an imperative user turn, a reset, or
+ * a reopen `hydrate` that seeds the transcript from persisted history (V6.2).
+ */
 export type StoreAction =
   | { type: "event"; event: NormalizedEvent }
   | { type: "user-message"; id: string; text: string }
+  | { type: "hydrate"; messages: PersistedMessage[] }
   | { type: "reset" };
 
 /**
@@ -282,6 +299,25 @@ function resolveApproval(
  */
 export function reduce(state: SessionLiveState, action: StoreAction): SessionLiveState {
   if (action.type === "reset") return createEmptySessionState();
+
+  if (action.type === "hydrate") {
+    // Reopen: rebuild the transcript from persisted history (V6.2). A user turn becomes a plain
+    // bubble; an assistant turn is reconstructed from its stored blocks (its tool-block history),
+    // falling back to a single text block from `content` for a row saved before blocks existed.
+    const messages: ChatMessage[] = action.messages.map((m) => {
+      if (m.role === "assistant") {
+        const blocks: InlineBlock[] =
+          m.blocks && m.blocks.length > 0
+            ? m.blocks
+            : [{ kind: "text", partID: `${m.id}:text`, text: m.content }];
+        return { role: "assistant", id: m.id, blocks };
+      }
+      return { role: "user", id: m.id, content: m.content };
+    });
+    // A hydrate replaces the transcript with the persisted one and clears live/echo bookkeeping;
+    // the caller only hydrates a session that has no live state, so nothing streamed is lost.
+    return { ...createEmptySessionState(), messages };
+  }
 
   if (action.type === "user-message") {
     return {
@@ -421,6 +457,12 @@ export interface Store {
   handleEvent: (event: NormalizedEvent) => void;
   /** Append the user's turn to a session and arm echo suppression; returns the message id. */
   appendUserMessage: (sessionId: string, text: string) => string;
+  /**
+   * Seed a session's transcript from persisted history on reopen (V6.2). A no-op if the session
+   * already has live state (streamed messages or a turn in flight), so a late-arriving fetch can
+   * never clobber a conversation the user has already started.
+   */
+  hydrateSession: (sessionId: string, messages: PersistedMessage[]) => void;
   /** Drop a session's live state entirely (on delete). */
   removeSession: (sessionId: string) => void;
   /** Reset a session's live state to empty (keeps it in the Map). */
@@ -481,6 +523,17 @@ export function useSessionStore(): Store {
     return id;
   }, [dispatch]);
 
+  const hydrateSession = useCallback(
+    (sessionId: string, messages: PersistedMessage[]) => {
+      // Guard against clobbering a live session: only hydrate one with no streamed messages and
+      // no turn in flight, so a slow reopen fetch that lands after the user starts typing is dropped.
+      const existing = mapRef.current.get(sessionId);
+      if (existing && (existing.messages.length > 0 || existing.isWorking)) return;
+      dispatch(sessionId, { type: "hydrate", messages });
+    },
+    [dispatch],
+  );
+
   const removeSession = useCallback((sessionId: string) => {
     mapRef.current.delete(sessionId);
     if (sessionId === activeIdRef.current) {
@@ -501,6 +554,7 @@ export function useSessionStore(): Store {
     getState,
     handleEvent,
     appendUserMessage,
+    hydrateSession,
     removeSession,
     reset,
   };

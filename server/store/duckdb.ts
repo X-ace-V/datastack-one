@@ -79,16 +79,23 @@ const MIGRATION_STATEMENTS: readonly string[] = [
   // FR1/FR2 — persisted chat history, one row per user/assistant message in a session.
   // `seq` orders the transcript monotonically within a session so reopening replays it in
   // order (wall-clock `created_at` can tie at sub-ms resolution). `role` is 'user' |
-  // 'assistant'; `content` is the message text. Streamed tool/approval detail is audited in
-  // `lineage`, keeping this table the plain conversational transcript.
+  // 'assistant'; `content` is the message text (for an assistant turn, its text blocks joined).
+  // `blocks` holds the assistant turn's ordered rendered blocks (text/reasoning/tool cards) as
+  // JSON so reopening a session reconstructs its tool-block history, not just the plain text
+  // (V6.2, FR1) — NULL on a user message. The ask/answer + DQ audit still lives in `lineage`.
   `CREATE TABLE IF NOT EXISTS platform.messages (
      id         VARCHAR PRIMARY KEY,
      session_id VARCHAR NOT NULL,
      seq        BIGINT NOT NULL,
      role       VARCHAR NOT NULL,
      content    VARCHAR NOT NULL,
+     blocks     VARCHAR,
      created_at TIMESTAMP NOT NULL DEFAULT now()
    );`,
+  // Backfill the V6.2 `blocks` column onto a warehouse migrated before it existed. `CREATE TABLE
+  // IF NOT EXISTS` above never alters an existing table, so an on-disk DB from an earlier build
+  // needs this idempotent ALTER; `ADD COLUMN IF NOT EXISTS` is a no-op once the column is there.
+  `ALTER TABLE platform.messages ADD COLUMN IF NOT EXISTS blocks VARCHAR;`,
 
   // FR9/FR10/FR12 — the conversational agent's per-session lineage/audit log. One append-only
   // row per auditable event the agent produced — a tool call, an approval decision, or a DQ

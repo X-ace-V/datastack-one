@@ -145,6 +145,26 @@ export interface Session {
   updatedAt: string;
 }
 
+/**
+ * One rendered block of a persisted assistant turn (V6.2) — the durable mirror of the store's
+ * `InlineBlock`, minus the transient `approval` pill. Reopening a session reconstructs a turn's
+ * tool-block history from these. Kept in sync with the backend `PersistedBlockSchema`.
+ */
+export type PersistedBlock =
+  | { kind: "text"; partID: string; text: string }
+  | { kind: "reasoning"; partID: string; text: string }
+  | {
+      kind: "tool";
+      callID: string;
+      tool: string;
+      status: "pending" | "running" | "completed" | "error";
+      input?: Record<string, unknown>;
+      output?: string;
+      error?: string;
+      title?: string;
+      metadata?: Record<string, unknown>;
+    };
+
 /** One persisted transcript message, mirroring the backend `MessageSchema` (FR1). */
 export interface Message {
   id: string;
@@ -153,6 +173,8 @@ export interface Message {
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: string;
+  /** An assistant turn's ordered rendered blocks (V6.2); absent on a user message. */
+  blocks?: PersistedBlock[];
 }
 
 /** A session together with its ordered history, mirroring `SessionWithHistorySchema` (FR1). */

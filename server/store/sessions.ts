@@ -7,6 +7,7 @@ import {
   type MessageRole,
   type Session,
 } from "../core/sessions.js";
+import { PersistedBlocksSchema, type PersistedBlock } from "../core/transcript.js";
 
 /**
  * Persistence for chat sessions and their message history (PRD FR1, v2) in the DuckDB
@@ -25,9 +26,13 @@ const SESSION_COLUMNS =
   "id, title, model, CAST(created_at AS VARCHAR) AS created_at, " +
   "CAST(updated_at AS VARCHAR) AS updated_at";
 
-/** The column list every message read selects; `created_at` cast to VARCHAR as above. */
+/**
+ * The column list every message read selects; `created_at` cast to VARCHAR as above. `blocks`
+ * is the raw JSON string (or NULL) the read parses into {@link PersistedBlock}s.
+ */
 const MESSAGE_COLUMNS =
-  "id, session_id, seq, role, content, CAST(created_at AS VARCHAR) AS created_at";
+  "id, session_id, seq, role, content, blocks, " +
+  "CAST(created_at AS VARCHAR) AS created_at";
 
 /** Map a raw `platform.sessions` row (snake_case, nullable model) to a {@link Session}. */
 function rowToSession(row: Record<string, unknown>): Session {
@@ -40,8 +45,18 @@ function rowToSession(row: Record<string, unknown>): Session {
   });
 }
 
-/** Map a raw `platform.messages` row (snake_case, bigint seq) to a {@link Message}. */
+/**
+ * Map a raw `platform.messages` row (snake_case, bigint seq) to a {@link Message}. An assistant
+ * row's `blocks` is stored as a JSON string; parse + validate it into {@link PersistedBlock}s so
+ * a reopened turn reconstructs its tool-block history (V6.2). A user row's `blocks` is NULL and
+ * the field is omitted.
+ */
 function rowToMessage(row: Record<string, unknown>): Message {
+  const rawBlocks = row.blocks;
+  const blocks =
+    typeof rawBlocks === "string" && rawBlocks.length > 0
+      ? PersistedBlocksSchema.parse(JSON.parse(rawBlocks))
+      : undefined;
   return MessageSchema.parse({
     id: row.id,
     sessionId: row.session_id,
@@ -50,6 +65,7 @@ function rowToMessage(row: Record<string, unknown>): Message {
     role: row.role,
     content: row.content,
     createdAt: row.created_at,
+    ...(blocks !== undefined ? { blocks } : {}),
   });
 }
 
@@ -206,6 +222,72 @@ export async function appendMessage(
   const row = rows[0];
   if (!row) {
     throw new Error(`message ${id} was not found immediately after insert`);
+  }
+  return rowToMessage(row);
+}
+
+/** Fields needed to persist one assistant turn with its rendered blocks (V6.2). */
+export interface PersistAssistantMessageInput {
+  /** Owning session id. */
+  sessionId: string;
+  /** The OpenCode message id — used AS this row's primary key so re-flushing a turn upserts. */
+  messageID: string;
+  /** The turn's plain text (its text blocks joined) — the text-only fallback for `content`. */
+  content: string;
+  /** The turn's ordered rendered blocks (text/reasoning/tool cards). */
+  blocks: PersistedBlock[];
+}
+
+/**
+ * Persist (or update) one assistant turn together with its ordered blocks so reopening a session
+ * reconstructs the tool-block history, not just text (V6.2, FR1). The OpenCode `messageID` is the
+ * row's primary key, so re-flushing the same turn (e.g. a second `idle`) upserts in place rather
+ * than duplicating: an existing row's `content`/`blocks` are refreshed and its `seq` kept, a new
+ * row gets the next `seq` (`max+1`) so it replays after the user prompt that preceded it. The
+ * session's `updated_at` bumps so the sidebar floats it up. Returns the persisted message.
+ */
+export async function persistAssistantMessage(
+  store: WarehouseStore,
+  input: PersistAssistantMessageInput,
+): Promise<Message> {
+  const blocksJson = JSON.stringify(input.blocks);
+  const existing = await store.all(
+    `SELECT 1 FROM platform.messages WHERE id = $1`,
+    [input.messageID],
+  );
+
+  if (existing.length > 0) {
+    await store.run(
+      `UPDATE platform.messages SET content = $1, blocks = $2 WHERE id = $3`,
+      [input.content, blocksJson, input.messageID],
+    );
+  } else {
+    const seqRows = await store.all(
+      `SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq
+         FROM platform.messages WHERE session_id = $1`,
+      [input.sessionId],
+    );
+    const seq = Number(seqRows[0]?.next_seq ?? 0);
+    await store.run(
+      `INSERT INTO platform.messages (id, session_id, seq, role, content, blocks)
+       VALUES ($1, $2, $3, 'assistant', $4, $5)`,
+      [input.messageID, input.sessionId, seq, input.content, blocksJson],
+    );
+  }
+
+  // The turn's reply counts as activity, so the session floats to the top of the sidebar.
+  await store.run(
+    `UPDATE platform.sessions SET updated_at = now() WHERE id = $1`,
+    [input.sessionId],
+  );
+
+  const rows = await store.all(
+    `SELECT ${MESSAGE_COLUMNS} FROM platform.messages WHERE id = $1`,
+    [input.messageID],
+  );
+  const row = rows[0];
+  if (!row) {
+    throw new Error(`message ${input.messageID} was not found immediately after upsert`);
   }
   return rowToMessage(row);
 }

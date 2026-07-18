@@ -312,6 +312,94 @@ describe("reduce — immutability", () => {
   });
 });
 
+describe("reduce — hydrate from persisted history (V6.2)", () => {
+  it("reconstructs user turns and an assistant turn's tool-block history", () => {
+    const state = reduce(createEmptySessionState(), {
+      type: "hydrate",
+      messages: [
+        { role: "user", id: "u1", content: "which branch?" },
+        {
+          role: "assistant",
+          id: "a1",
+          content: "The north branch.",
+          blocks: [
+            { kind: "reasoning", partID: "r1", text: "I'll query it." },
+            {
+              kind: "tool",
+              callID: "c1",
+              tool: "run_query",
+              status: "completed",
+              input: { sql: "SELECT branch FROM loans" },
+              output: "north",
+            },
+            { kind: "text", partID: "p1", text: "The north branch." },
+          ],
+        },
+      ],
+    });
+
+    expect(state.messages).toHaveLength(2);
+    expect(state.messages[0]).toEqual({ role: "user", id: "u1", content: "which branch?" });
+    const asst = state.messages[1] as AssistantMessage;
+    expect(asst.role).toBe("assistant");
+    expect(asst.id).toBe("a1");
+    // The tool card and its reading-order neighbours reconstruct exactly.
+    expect(asst.blocks.map((b) => b.kind)).toEqual(["reasoning", "tool", "text"]);
+    expect(asst.blocks[1]).toMatchObject({ kind: "tool", tool: "run_query", status: "completed" });
+    // A reopened session is idle with no pending gates.
+    expect(state.isWorking).toBe(false);
+    expect(state.pendingApprovals).toEqual([]);
+  });
+
+  it("falls back to a single text block for an assistant row saved without blocks", () => {
+    const state = reduce(createEmptySessionState(), {
+      type: "hydrate",
+      messages: [{ role: "assistant", id: "a1", content: "hello" }],
+    });
+    const asst = state.messages[0] as AssistantMessage;
+    expect(asst.blocks).toEqual([{ kind: "text", partID: "a1:text", text: "hello" }]);
+  });
+});
+
+describe("useSessionStore — hydrateSession (V6.2)", () => {
+  it("seeds an unseen session's transcript from persisted history", () => {
+    const { result } = renderHook(() => useSessionStore());
+    act(() =>
+      result.current.hydrateSession("ses_a", [
+        { role: "user", id: "u1", content: "hi" },
+        {
+          role: "assistant",
+          id: "a1",
+          content: "hey",
+          blocks: [{ kind: "text", partID: "p1", text: "hey" }],
+        },
+      ]),
+    );
+    act(() => result.current.setActiveSession("ses_a"));
+    expect(result.current.activeState.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+  });
+
+  it("does not clobber a session that already has live/streamed state", () => {
+    const { result } = renderHook(() => useSessionStore());
+    act(() => result.current.setActiveSession("ses_a"));
+    act(() => {
+      result.current.appendUserMessage("ses_a", "in-flight prompt");
+    });
+    // A late reopen fetch tries to hydrate the same session — it must be ignored.
+    act(() =>
+      result.current.hydrateSession("ses_a", [
+        { role: "user", id: "stale", content: "stale history" },
+      ]),
+    );
+    expect(result.current.activeState.messages).toEqual([
+      { role: "user", id: expect.any(String), content: "in-flight prompt" },
+    ]);
+  });
+});
+
 describe("useSessionStore — active-session mirroring", () => {
   it("mirrors only the active session to React state; background sessions accumulate", () => {
     const { result } = renderHook(() => useSessionStore());
