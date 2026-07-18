@@ -9,6 +9,8 @@ import { ASK_TOOLS } from "./config.js";
 import { buildServer } from "../app.js";
 import { openStore, type WarehouseStore } from "../store/duckdb.js";
 import { registerSessionSource } from "../store/session-sources.js";
+import { addConnection } from "../store/connections.js";
+import type { AttachResult } from "../connections/attach.js";
 import { createToolApprovalGate, type ToolApprovalGate } from "./tool-approvals.js";
 import { createSessionDqGate, type SessionDqGate } from "./session-dq.js";
 import type { ApprovalAction, ApprovalRequest } from "../core/approvals.js";
@@ -36,6 +38,20 @@ describe("data-tools plugin", () => {
     else process.env.DATASTACK_INTERNAL_URL = prevInternalUrl;
   });
 
+  /** Fixed tables the stub Postgres attacher returns for the `attach_source` tool test. */
+  const ATTACH_STUB_TABLES: AttachResult = {
+    tables: [
+      {
+        schema: "public",
+        table: "loans",
+        columns: [
+          { name: "loan_id", type: "BIGINT" },
+          { name: "amount", type: "DOUBLE" },
+        ],
+      },
+    ],
+  };
+
   const LOANS_CSV =
     "loan_id,customer_id,branch,balance,opened_at\n" +
     "1,100,north,1000.50,2024-01-01\n" +
@@ -60,6 +76,7 @@ describe("data-tools plugin", () => {
     "load_warehouse",
     "run_transform",
     "publish_serving",
+    "attach_source",
   ] as const;
 
   type Tools = Record<(typeof TOOL_NAMES)[number], ToolDefinition>;
@@ -142,7 +159,18 @@ describe("data-tools plugin", () => {
     const landingDir = await mkdtemp(join(tmpdir(), "plugin-land-"));
     const servingDir = await mkdtemp(join(tmpdir(), "plugin-serve-"));
     tmpDirs.push(landingDir, servingDir);
-    const app = buildServer({ store, landingDir, servingDir, toolApprovals: gate, dqGate });
+    // A stub Postgres attacher: the real ATTACH needs a live database (covered by
+    // connections/attach.test.ts), so here we return fixed tables to drive the `attach_source`
+    // tool's own contract over the real loopback + gate.
+    const attachSource = async (): Promise<AttachResult> => ATTACH_STUB_TABLES;
+    const app = buildServer({
+      store,
+      landingDir,
+      servingDir,
+      toolApprovals: gate,
+      dqGate,
+      attachSource,
+    });
     const address = await app.listen({ port: 0, host: "127.0.0.1" });
     process.env.DATASTACK_INTERNAL_URL = address;
     return {
@@ -160,8 +188,9 @@ describe("data-tools plugin", () => {
     };
   }
 
-  it("registers the read tools and the four write tools with descriptions and args", async () => {
+  it("registers the read tools and the five write tools with descriptions and args", async () => {
     expect(await registeredToolNames()).toEqual([
+      "attach_source",
       "land_parquet",
       "list_sources",
       "load_warehouse",
@@ -187,6 +216,8 @@ describe("data-tools plugin", () => {
     expect(Object.keys(tools.load_warehouse.args).sort()).toEqual(["dataset", "schema", "table"]);
     expect(Object.keys(tools.run_transform.args).sort()).toEqual(["sql", "targetTable"]);
     expect(Object.keys(tools.publish_serving.args).sort()).toEqual(["name", "table"]);
+    // attach_source takes only the registered connection name (never a URL, FR5b).
+    expect(Object.keys(tools.attach_source.args)).toEqual(["name"]);
   });
 
   it("registers a gated tool for exactly each ASK_TOOL, each describing its approval", async () => {
@@ -410,6 +441,70 @@ describe("data-tools plugin", () => {
       // proving the tool did NOT run before approval.
       expect(await tableExists(store, "raw", "source")).toBe(false);
       expect(await tableExists(store, "marts", "x")).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  // V5.2/FR5b: attach_source pauses for approval, resolves the connection NAME → URL backend-side,
+  // and returns name + schema — the raw URL never crosses the loopback or surfaces in the chat.
+
+  it("attaches a registered connection by name — approval fires, URL never surfaces", async () => {
+    const { store, emitted, setAnswer, close } = await backend();
+    try {
+      const secretUrl = "postgresql://alice:hunter2@db.neon.tech/lending?sslmode=require";
+      await addConnection(store, { name: "neon", type: "postgres", url: secretUrl });
+      const tools = await instantiate();
+      setAnswer("approve");
+
+      const res = await tools.attach_source.execute({ name: "neon" }, ctx("ses_a"));
+      const attach = res as unknown as {
+        title: string;
+        output: string;
+        metadata: { attach: { name: string; tables: { table: string }[] } };
+      };
+      // The agent sees the connection name + its tables (schema) — the model-safe result.
+      expect(attach.metadata.attach.name).toBe("neon");
+      expect(attach.metadata.attach.tables.map((t) => t.table)).toEqual(["loans"]);
+      expect(attach.output).toContain("neon.public.loans");
+
+      // The approval surfaced inline naming the tool + connection, and NEVER the URL/credential.
+      const approval = emitted.find((e) => e.kind === "approval") as { type: string } | undefined;
+      expect(approval?.type).toBe("attach_source");
+      const trace = JSON.stringify({ res, emitted });
+      expect(trace).not.toContain("hunter2");
+      expect(trace).not.toContain(secretUrl);
+    } finally {
+      await close();
+    }
+  });
+
+  it("attach_source denied: nothing attaches and the tool reports the denial", async () => {
+    const { store, setAnswer, close } = await backend();
+    try {
+      await addConnection(store, {
+        name: "neon",
+        type: "postgres",
+        url: "postgresql://u:p@h/db",
+      });
+      const tools = await instantiate();
+      setAnswer("reject");
+
+      const res = await tools.attach_source.execute({ name: "neon" }, ctx("ses_a"));
+      expect(typeof res).toBe("string");
+      expect(res as string).toMatch(/was not run: the approval was denied/);
+    } finally {
+      await close();
+    }
+  });
+
+  it("attach_source guides the agent when the connection is not registered", async () => {
+    const { setAnswer, close } = await backend();
+    try {
+      const tools = await instantiate();
+      setAnswer("approve");
+      const res = await tools.attach_source.execute({ name: "missing" }, ctx("ses_a"));
+      expect(res as string).toMatch(/No connection named "missing" is registered/);
     } finally {
       await close();
     }

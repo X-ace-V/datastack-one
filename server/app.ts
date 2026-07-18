@@ -58,6 +58,7 @@ import {
   listConnections,
 } from "./store/connections.js";
 import type { ConnectionTester } from "./connections/postgres.js";
+import type { PostgresAttacher } from "./connections/attach.js";
 import { listSessionLineage, recordLineageEvent } from "./store/session-lineage.js";
 import type { LineageStatus } from "./core/session-lineage.js";
 import {
@@ -69,6 +70,7 @@ import {
   LoadWarehouseRequestSchema,
   RunTransformRequestSchema,
   PublishServingRequestSchema,
+  AttachSourceRequestSchema,
 } from "./core/tool-io.js";
 import { DqSpecSchema, DQ_TARGET_TABLE } from "./core/dq.js";
 import { runDqCheck } from "./tools/dq.js";
@@ -128,6 +130,13 @@ export interface ServerDeps {
    * test-connection route reports 503 (add/list/delete still work off the store alone).
    */
   testConnection?: ConnectionTester;
+  /**
+   * Attaches a registered Postgres connection into the warehouse read-only, backing the
+   * ask-gated `attach_source` tool (V5.2, FR5b). Injected so route tests supply an offline stub
+   * while the real boot wires the DuckDB Postgres ATTACH. Absent → `attach_source` reports 503
+   * (the other tool routes are unaffected).
+   */
+  attachSource?: PostgresAttacher;
   /**
    * SessionManager backing the chat-session routes (FR1). It orchestrates the OpenCode
    * runtime and the `platform` store, so a health-only boot (no runtime) leaves it absent
@@ -1447,6 +1456,74 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         error: message,
       });
       return reply.code(422).send({ error: `could not publish table: ${message}` });
+    }
+  });
+
+  // `attach_source`: attach a registered Postgres connection to the session read-only (V5.2, FR5b).
+  // The model sends only the connection NAME; the backend resolves it to the credentialed URL and
+  // ATTACHes read-only — the raw URL never reaches the model, the approval pill, or the SSE stream.
+  // Ask-gated like the other writes (it connects a live database), so it pauses for approval; the
+  // approval metadata carries only the name + type, never the URL. Status map: 503 unwired
+  // store/gate/attacher, 400 bad body (incl. an invalid connection name), 404 no connection of that
+  // name registered, 422 the attach failed (secret-scrubbed detail), 200 with `{ name, tables }`
+  // (or `{ approved: false }` on rejection).
+  app.post("/api/internal/tools/attach_source", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    if (!deps.toolApprovals) {
+      return reply.code(503).send({ error: "approval gate unavailable" });
+    }
+    if (!deps.attachSource) {
+      return reply.code(503).send({ error: "postgres attach unavailable" });
+    }
+    const parsed = AttachSourceRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: "invalid attach_source request", details: parsed.error.issues });
+    }
+
+    // Resolve name → the stored connection BEFORE opening the approval — no point asking a human to
+    // approve attaching a connection that was never registered. The secret url stays in this local;
+    // it is NEVER put into the approval metadata, the lineage detail, or the response (FR5b).
+    const stored = await getStoredConnection(deps.store, parsed.data.name);
+    if (!stored) {
+      return reply.code(404).send({ error: "connection not found" });
+    }
+
+    const approved = await awaitWriteApproval(parsed.data.sessionID, "attach_source", {
+      tool: "attach_source",
+      connection: parsed.data.name,
+      type: stored.type,
+      summary: `Attach connection "${parsed.data.name}" (${stored.type}) read-only.`,
+    });
+    if (!approved) {
+      await recordToolCallLineage(parsed.data.sessionID, "attach_source", "rejected", {
+        connection: parsed.data.name,
+      });
+      return reply.code(200).send({ approved: false });
+    }
+
+    try {
+      const result = await deps.attachSource(deps.store, {
+        alias: parsed.data.name,
+        url: stored.url,
+      });
+      await recordToolCallLineage(parsed.data.sessionID, "attach_source", "completed", {
+        connection: parsed.data.name,
+        tableCount: result.tables.length,
+      });
+      return reply.code(200).send({ name: parsed.data.name, tables: result.tables });
+    } catch (err) {
+      // The attacher scrubs the secret out of any driver error before throwing, so this message is
+      // safe to surface + persist.
+      const message = err instanceof Error ? err.message : String(err);
+      await recordToolCallLineage(parsed.data.sessionID, "attach_source", "error", {
+        connection: parsed.data.name,
+        error: message,
+      });
+      return reply.code(422).send({ error: `could not attach connection: ${message}` });
     }
   });
 

@@ -222,6 +222,48 @@ interface PublishResult {
   rowCount: number;
 }
 
+/** One column of an attached connection's table, as `attach_source` returns it. */
+interface AttachedColumn {
+  name: string;
+  type: string;
+}
+
+/** One table an attached connection exposes read-only: schema, name, and columns. */
+interface AttachedTable {
+  schema: string;
+  table: string;
+  columns: AttachedColumn[];
+}
+
+/** What `attach_source` returns once a registered connection is attached read-only. */
+interface AttachSourceResult {
+  name: string;
+  tables: AttachedTable[];
+}
+
+/** Render an attach result as a compact, model-readable schema summary (never a URL). */
+function formatAttachResult(result: AttachSourceResult): string {
+  if (result.tables.length === 0) {
+    return (
+      `Attached connection "${result.name}" read-only, but it exposes no tables. ` +
+      "Check the database has tables the connection can read."
+    );
+  }
+  const lines = [
+    `Attached connection "${result.name}" read-only — ${result.tables.length} ` +
+      `table${result.tables.length === 1 ? "" : "s"}. ` +
+      `Query them as ${result.name}.<schema>.<table> with run_query.`,
+    "",
+    ...result.tables.map(
+      (t) =>
+        `  - ${result.name}.${t.schema}.${t.table} (${t.columns.length} col` +
+        `${t.columns.length === 1 ? "" : "s"}): ` +
+        t.columns.map((c) => `${c.name} ${c.type}`).join(", "),
+    ),
+  ];
+  return lines.join("\n");
+}
+
 /**
  * The message a write tool returns to the model when the human denied its approval.
  * `body.approved === false` from a write route means the human rejected the inline approval.
@@ -584,6 +626,46 @@ export const DatastackToolsPlugin: Plugin = async () => {
               `Published marts.${args.table} as "${result.name}" (${result.rowCount} rows). ` +
               `REST: ${result.endpoint} · CSV: ${result.csvEndpoint}.`,
             metadata: { publish: result },
+          };
+        },
+      }),
+
+      attach_source: tool({
+        description:
+          "Attach a registered database connection (added in Settings → Connections) to this " +
+          "session, read-only, so its live tables become queryable by name alongside CSVs. Pass " +
+          "the connection NAME only — never a URL; credentials live only in Settings and never " +
+          "reach you. This connects a live database, so it pauses for your explicit approval " +
+          "before it runs. After attaching, query its tables as <name>.<schema>.<table> with " +
+          "run_query (you can join them to a CSV).",
+        args: {
+          name: z
+            .string()
+            .describe("The registered connection name to attach (from Settings → Connections)."),
+        },
+        async execute(args, context) {
+          const { denied, ok, status, body } = await callWriteRoute(
+            "/api/internal/tools/attach_source",
+            { sessionID: context.sessionID, name: args.name },
+          );
+          if (denied) return deniedMessage("attach_source");
+          if (status === 404) {
+            return (
+              `No connection named "${args.name}" is registered. ` +
+              "Ask the user to add it in Settings → Connections first."
+            );
+          }
+          if (status === 422) {
+            const detail =
+              (body as { error?: string })?.error ?? "the connection could not be attached";
+            return `attach_source failed: ${detail}.`;
+          }
+          if (!ok) return `Failed to attach "${args.name}" (status ${status}).`;
+          const result = body as AttachSourceResult;
+          return {
+            title: `Attached ${result.name}`,
+            output: formatAttachResult(result),
+            metadata: { attach: result },
           };
         },
       }),

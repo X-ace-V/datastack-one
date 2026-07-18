@@ -41,18 +41,20 @@ describe("buildOpencodeConfig", () => {
 });
 
 describe("ASK_TOOLS approval gate", () => {
-  it("names exactly the four write/execute custom tools (FR8, ARCHITECTURE §5)", () => {
+  it("names exactly the write/execute custom tools (FR8/FR5b, ARCHITECTURE §5)", () => {
     expect([...ASK_TOOLS]).toEqual([
       "land_parquet",
       "load_warehouse",
       "run_transform",
       "publish_serving",
+      "attach_source",
     ]);
   });
 
   it("recognizes gated tools and lets read-only tools through", () => {
     expect(isAskTool("run_transform")).toBe(true);
     expect(isAskTool("publish_serving")).toBe(true);
+    expect(isAskTool("attach_source")).toBe(true);
     expect(isAskTool("profile_source")).toBe(false);
     expect(isAskTool("read_rules")).toBe(false);
   });

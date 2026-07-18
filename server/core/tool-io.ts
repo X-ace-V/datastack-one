@@ -3,6 +3,7 @@ import { ListedSourceSchema } from "./session-sources.js";
 import { SourceProfileSchema } from "./profile.js";
 import { QueryResultSchema } from "./query.js";
 import { DqCheckSchema, DqRunResultSchema } from "./dq.js";
+import { ConnectionNameSchema } from "./connections.js";
 
 /**
  * Pure request/response contracts for the internal loopback the agent tools call
@@ -174,3 +175,43 @@ export const PublishServingResponseSchema = z.object({
   rowCount: z.number().int().nonnegative(),
 });
 export type PublishServingResponse = z.infer<typeof PublishServingResponseSchema>;
+
+/**
+ * `attach_source` request (V5.2, FR5b): attach a registered Postgres connection to the session's
+ * DuckDB, read-only, so its tables become queryable by name. The model sends ONLY the connection
+ * **name** — the backend resolves it to the credentialed URL; the raw URL never crosses this
+ * boundary or reaches the model. The name is validated as a SQL identifier ({@link
+ * ConnectionNameSchema}) so it can be interpolated as the `ATTACH … AS <name>` alias with no
+ * injection risk, and it must match a connection registered in Settings (else 404).
+ */
+export const AttachSourceRequestSchema = z.object({
+  sessionID: z.string().min(1),
+  name: ConnectionNameSchema,
+});
+export type AttachSourceRequest = z.infer<typeof AttachSourceRequestSchema>;
+
+/** One column of an attached database table, as surfaced to the agent (name + DuckDB type). */
+export const AttachedColumnSchema = z.object({
+  name: z.string().min(1),
+  type: z.string().min(1),
+});
+export type AttachedColumn = z.infer<typeof AttachedColumnSchema>;
+
+/** One table exposed by an attached connection: its schema, name, and columns (the model "schema"). */
+export const AttachedTableSchema = z.object({
+  schema: z.string().min(1),
+  table: z.string().min(1),
+  columns: z.array(AttachedColumnSchema),
+});
+export type AttachedTable = z.infer<typeof AttachedTableSchema>;
+
+/**
+ * `attach_source` response: the connection name plus the tables it exposes read-only (schema +
+ * columns). This is the "name + schema" the agent sees (FR5b) — deliberately NO URL. The agent
+ * queries a table as `<name>.<schema>.<table>` via `run_query`.
+ */
+export const AttachSourceResponseSchema = z.object({
+  name: z.string().min(1),
+  tables: z.array(AttachedTableSchema),
+});
+export type AttachSourceResponse = z.infer<typeof AttachSourceResponseSchema>;

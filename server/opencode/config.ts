@@ -31,6 +31,7 @@ export const ASK_TOOLS = [
   "load_warehouse",
   "run_transform",
   "publish_serving",
+  "attach_source",
 ] as const;
 
 export type AskTool = (typeof ASK_TOOLS)[number];
