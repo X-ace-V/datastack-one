@@ -86,6 +86,7 @@ conversational shell also needs are not built yet.
 | `GET /api/models` | Live provider/model catalog (FR13). |
 | `POST /api/sessions` · `GET /api/sessions` | Create / list chat sessions (FR1). |
 | `GET /api/sessions/:id` | A session with its message history (FR1). |
+| `GET /api/sessions/:id/lineage` | A session's audit trail: write tool calls, approvals, DQ results (FR12). |
 | `PATCH /api/sessions/:id` · `DELETE /api/sessions/:id` | Rename / delete a session (FR1). |
 | `POST /api/sessions/:id/chat` · `POST /api/sessions/:id/cancel` | Send an NL turn / cancel the in-flight turn (FR2). |
 | `POST /api/sessions/:id/sources` | Upload a CSV into a session → loaded in DuckDB + registered so the agent tools see it (FR4). |

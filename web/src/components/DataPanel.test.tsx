@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { DataPanel } from "./DataPanel";
 import { createEmptySessionState, type SessionLiveState } from "../store/sessionStore";
 
@@ -209,5 +209,41 @@ describe("DataPanel", () => {
     render(<DataPanel state={createEmptySessionState()} />);
     expect(screen.getByRole("complementary", { name: "Data panel" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Data" })).toBeTruthy();
+  });
+
+  it("renders the audit trail section (V4.4) when a session is active", async () => {
+    const fetchMock = vi.fn(async (_url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        lineage: [
+          {
+            id: "l1",
+            sessionId: "ses_1",
+            runId: null,
+            seq: 0,
+            kind: "tool_call",
+            tool: "publish_serving",
+            status: "completed",
+            detail: { name: "branch_report", rowCount: 4 },
+            createdAt: "2026-07-18T10:00:00Z",
+          },
+        ],
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      render(<DataPanel state={createEmptySessionState()} sessionId="ses_1" />);
+      // The audit-trail region shows even with no store-derived content (not the placeholder).
+      const region = screen.getByRole("region", { name: "Audit trail" });
+      expect(region).toBeTruthy();
+      expect(screen.queryByText(/Schema, query results, and endpoints appear here/)).toBeNull();
+      await waitFor(() =>
+        expect(within(region).getByText("publish_serving")).toBeTruthy(),
+      );
+      expect(fetchMock.mock.calls[0]?.[0]).toContain("/api/sessions/ses_1/lineage");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

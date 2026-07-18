@@ -50,6 +50,8 @@ import {
   toSessionSourceView,
 } from "./core/session-sources.js";
 import { getSession } from "./store/sessions.js";
+import { listSessionLineage, recordLineageEvent } from "./store/session-lineage.js";
+import type { LineageStatus } from "./core/session-lineage.js";
 import {
   ListSourcesRequestSchema,
   ProfileSourceRequestSchema,
@@ -236,6 +238,26 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         return reply.code(404).send({ error: "session not found" });
       }
       return reply.code(200).send(session);
+    },
+  );
+
+  // FR12: a session's lineage/audit trail — the write tool calls it executed, the approvals a
+  // human answered, and the DQ results, in `seq` order (V4.4). Reads straight from the `platform`
+  // store (the persistence, not the live in-memory gates), so the trail survives a restart and a
+  // reopened session. This is the audit PRD §5 verifies "100% of writes were approved" against.
+  // Status map: 503 no store, 404 unknown session, 200 with `{ lineage }`.
+  app.get<{ Params: { id: string } }>(
+    "/api/sessions/:id/lineage",
+    async (req, reply) => {
+      if (!deps.store) {
+        return reply.code(503).send({ error: "lineage store unavailable" });
+      }
+      const session = await getSession(deps.store, req.params.id);
+      if (!session) {
+        return reply.code(404).send({ error: "session not found" });
+      }
+      const lineage = await listSessionLineage(deps.store, req.params.id);
+      return reply.code(200).send({ lineage });
     },
   );
 
@@ -857,8 +879,21 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       }
 
       // The write-tool gate holds this request → answer it and release the paused write route.
-      if (deps.toolApprovals?.get(req.params.requestID)) {
-        const result = deps.toolApprovals.reply(req.params.requestID, parsed.data.action);
+      const pending = deps.toolApprovals?.get(req.params.requestID);
+      if (pending) {
+        // Record the decision in the session lineage BEFORE releasing the write route, so the
+        // approval precedes the tool_call in `seq` order — the trail reads "approved, then
+        // executed" (FR12, PRD §5 audit). Best-effort when no store is wired (health-only boot).
+        if (deps.store) {
+          await recordLineageEvent(deps.store, {
+            sessionId: pending.sessionID,
+            kind: "approval",
+            tool: pending.type,
+            status: parsed.data.action === "approve" ? "approved" : "rejected",
+            detail: { requestID: pending.requestID, metadata: pending.metadata },
+          });
+        }
+        const result = deps.toolApprovals!.reply(req.params.requestID, parsed.data.action);
         return reply.code(200).send(result);
       }
 
@@ -1011,6 +1046,20 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     }
     // Record on the gate so a failing run blocks a later publish for this session (FR9).
     deps.dqGate?.record(parsed.data.sessionID, result);
+    // Persist the outcome to the session lineage (FR12, V4.4) so the check that blocked a publish
+    // is explained in the audit trail — separate from the in-memory gate, which only holds the
+    // latest run for the publish decision.
+    await recordLineageEvent(deps.store, {
+      sessionId: parsed.data.sessionID,
+      kind: "dq_result",
+      tool: "run_dq_check",
+      status: result.passed ? "passed" : "failed",
+      detail: {
+        targetTable: result.targetTable,
+        passed: result.passed,
+        results: result.results,
+      },
+    });
     return reply.code(200).send({ result });
   });
 
@@ -1035,6 +1084,27 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   ): Promise<boolean> {
     const { decided } = deps.toolApprovals!.request({ sessionID, tool, metadata });
     return (await decided).status === "approved";
+  }
+
+  /**
+   * Record a write tool's execution outcome in the session lineage (FR12, V4.4). Called only from
+   * the write routes, which have already guarded `deps.store` (503 otherwise). A write's
+   * `tool_call` row is written after its approval was answered and its execution attempted, so the
+   * trail always shows the approval preceding the execution — the audit PRD §5 verifies.
+   */
+  async function recordToolCallLineage(
+    sessionID: string,
+    tool: string,
+    status: LineageStatus,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    await recordLineageEvent(deps.store!, {
+      sessionId: sessionID,
+      kind: "tool_call",
+      tool,
+      status,
+      detail,
+    });
   }
 
   // `land_parquet`: land a session's connected source to Parquet under `<landingDir>/<sessionID>/`.
@@ -1063,7 +1133,12 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       ...(parsed.data.ingestionDate ? { ingestionDate: parsed.data.ingestionDate } : {}),
       summary: `Land source "${parsed.data.source}" to partitioned Parquet.`,
     });
-    if (!approved) return reply.code(200).send({ approved: false });
+    if (!approved) {
+      await recordToolCallLineage(parsed.data.sessionID, "land_parquet", "rejected", {
+        source: parsed.data.source,
+      });
+      return reply.code(200).send({ approved: false });
+    }
 
     try {
       const result = await landParquet(deps.store, {
@@ -1072,6 +1147,12 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         dataset: source.name,
         ingestionDate: parsed.data.ingestionDate,
       });
+      await recordToolCallLineage(parsed.data.sessionID, "land_parquet", "completed", {
+        source: parsed.data.source,
+        dataset: result.dataset,
+        ingestionDate: result.ingestionDate,
+        rowCount: result.rowCount,
+      });
       return reply.code(200).send({
         dataset: result.dataset,
         ingestionDate: result.ingestionDate,
@@ -1079,6 +1160,10 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      await recordToolCallLineage(parsed.data.sessionID, "land_parquet", "error", {
+        source: parsed.data.source,
+        error: message,
+      });
       return reply.code(422).send({ error: `could not land source: ${message}` });
     }
   });
@@ -1109,7 +1194,14 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       table: targetTable,
       summary: `Load dataset "${parsed.data.dataset}" into ${targetSchema}.${targetTable}.`,
     });
-    if (!approved) return reply.code(200).send({ approved: false });
+    if (!approved) {
+      await recordToolCallLineage(parsed.data.sessionID, "load_warehouse", "rejected", {
+        dataset: parsed.data.dataset,
+        schema: targetSchema,
+        table: targetTable,
+      });
+      return reply.code(200).send({ approved: false });
+    }
 
     const landingPath = join(
       landingDir,
@@ -1122,6 +1214,11 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         schema: parsed.data.schema as "raw" | "staging" | undefined,
         table: parsed.data.table,
       });
+      await recordToolCallLineage(parsed.data.sessionID, "load_warehouse", "completed", {
+        dataset: parsed.data.dataset,
+        qualifiedTable: result.qualifiedTable,
+        rowCount: result.rowCount,
+      });
       return reply.code(200).send({
         qualifiedTable: result.qualifiedTable,
         schema: result.schema,
@@ -1130,6 +1227,10 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      await recordToolCallLineage(parsed.data.sessionID, "load_warehouse", "error", {
+        dataset: parsed.data.dataset,
+        error: message,
+      });
       return reply.code(422).send({ error: `could not load dataset: ${message}` });
     }
   });
@@ -1157,12 +1258,23 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       targetTable: parsed.data.targetTable,
       summary: `Run transform SQL into marts.${parsed.data.targetTable}.`,
     });
-    if (!approved) return reply.code(200).send({ approved: false });
+    if (!approved) {
+      await recordToolCallLineage(parsed.data.sessionID, "run_transform", "rejected", {
+        sql: parsed.data.sql,
+        targetTable: parsed.data.targetTable,
+      });
+      return reply.code(200).send({ approved: false });
+    }
 
     try {
       const result = await runTransform(deps.store, {
         sql: parsed.data.sql,
         targetTable: parsed.data.targetTable,
+      });
+      await recordToolCallLineage(parsed.data.sessionID, "run_transform", "completed", {
+        sql: parsed.data.sql,
+        qualifiedTable: result.qualifiedTable,
+        rowCount: result.rowCount,
       });
       return reply.code(200).send({
         qualifiedTable: result.qualifiedTable,
@@ -1171,6 +1283,11 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      await recordToolCallLineage(parsed.data.sessionID, "run_transform", "error", {
+        sql: parsed.data.sql,
+        targetTable: parsed.data.targetTable,
+        error: message,
+      });
       return reply.code(422).send({ error: `could not run transform: ${message}` });
     }
   });
@@ -1212,7 +1329,15 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       name: servedName,
       summary: `Publish marts.${parsed.data.table} as endpoint "${servedName}".`,
     });
-    if (!approved) return reply.code(200).send({ approved: false });
+    // A DQ-blocked publish (409 above) records no tool_call — the `dq_result` row already explains
+    // the block. From here on the publish was approved-or-rejected like any other write.
+    if (!approved) {
+      await recordToolCallLineage(parsed.data.sessionID, "publish_serving", "rejected", {
+        table: parsed.data.table,
+        name: servedName,
+      });
+      return reply.code(200).send({ approved: false });
+    }
 
     try {
       const result = await publishServing(deps.store, {
@@ -1220,6 +1345,12 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         projectId: parsed.data.sessionID,
         table: parsed.data.table,
         name: parsed.data.name,
+      });
+      await recordToolCallLineage(parsed.data.sessionID, "publish_serving", "completed", {
+        table: parsed.data.table,
+        name: result.name,
+        endpoint: result.endpoint,
+        rowCount: result.rowCount,
       });
       return reply.code(200).send({
         name: result.name,
@@ -1229,6 +1360,11 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      await recordToolCallLineage(parsed.data.sessionID, "publish_serving", "error", {
+        table: parsed.data.table,
+        name: servedName,
+        error: message,
+      });
       return reply.code(422).send({ error: `could not publish table: ${message}` });
     }
   });

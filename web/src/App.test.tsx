@@ -113,9 +113,14 @@ describe("App chat flow (V2.4)", () => {
     vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (_url: string, init?: RequestInit) => {
+      vi.fn(async (url: string, init?: RequestInit) => {
         const method = (init?.method ?? "GET").toUpperCase();
         if (method === "POST") return { ok: true, status: 202, json: async () => ({ id: "u1" }) };
+        // The data panel's audit-trail view (V4.4) fetches the session's lineage once a session
+        // is active — answer it with an empty trail so the shell renders without erroring.
+        if (String(url).includes("/lineage")) {
+          return { ok: true, status: 200, json: async () => ({ lineage: [] }) };
+        }
         return { ok: true, status: 200, json: async () => ({ sessions: [SESSION] }) };
       }),
     );

@@ -1,4 +1,5 @@
 import { EndpointsList } from "./EndpointsList";
+import { LineageView } from "./LineageView";
 import { ResultTable } from "./ResultTable";
 import { SchemaTable } from "./SchemaTable";
 import { latestQueryResult } from "../lib/query";
@@ -12,13 +13,29 @@ import type { SessionLiveState } from "../store/sessionStore";
  * schema profile and `run_query` a result table to their tool-call `metadata`, which rides the SSE
  * tool event into the store; {@link latestProfile}/{@link latestQueryResult} pull the latest of each
  * back out (PRD FR6/FR7/FR12). The schema shows above the most recent query result, and any published
- * REST endpoints below them; until any of the three has run, the panel shows its placeholder.
+ * REST endpoints below them.
+ *
+ * Below those, when a session is active, the persisted **audit trail** (V4.4, FR12) — write tool
+ * calls, approvals, DQ results — is rendered by {@link LineageView}, which reads it from the store
+ * over REST rather than the live stream. Until anything at all has run, the panel shows its
+ * placeholder.
  */
-export function DataPanel({ state }: { state: SessionLiveState }) {
+export function DataPanel({
+  state,
+  sessionId = null,
+}: {
+  state: SessionLiveState;
+  sessionId?: string | null;
+}) {
   const profile = latestProfile(state.messages);
   const result = latestQueryResult(state.messages);
   const endpoints = latestEndpoints(state.messages);
-  const hasContent = profile !== null || result !== null || endpoints.length > 0;
+  // The audit trail shows whenever a session is active (empty until a write/check runs), so an
+  // active session always has panel content even before its first query.
+  const hasContent =
+    profile !== null || result !== null || endpoints.length > 0 || sessionId !== null;
+  // Refetch the persisted lineage when a turn settles (a just-landed write/approval then shows).
+  const refreshKey = `${state.messages.length}:${state.isWorking}`;
 
   return (
     <aside
@@ -52,6 +69,14 @@ export function DataPanel({ state }: { state: SessionLiveState }) {
                 Endpoints
               </h3>
               <EndpointsList endpoints={endpoints} />
+            </section>
+          )}
+          {sessionId !== null && (
+            <section aria-label="Audit trail">
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Audit trail
+              </h3>
+              <LineageView sessionId={sessionId} refreshKey={refreshKey} />
             </section>
           )}
         </div>

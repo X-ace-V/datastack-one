@@ -198,6 +198,43 @@ export async function getSession(id: string): Promise<SessionWithHistory> {
   return (await res.json()) as SessionWithHistory;
 }
 
+/**
+ * One row of a session's lineage/audit trail, mirroring the backend `LineageEventSchema` (FR12).
+ * `kind` discriminates the event; `tool`/`status` are set per kind; `detail` is the kind-specific
+ * payload (write args + result, reviewed approval metadata, or DQ check outcomes).
+ */
+export interface LineageEvent {
+  id: string;
+  sessionId: string;
+  runId: string | null;
+  seq: number;
+  kind: "tool_call" | "approval" | "dq_result";
+  tool: string | null;
+  status:
+    | "completed"
+    | "error"
+    | "rejected"
+    | "approved"
+    | "passed"
+    | "failed"
+    | null;
+  detail: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+/**
+ * Fetch a session's lineage/audit trail in `seq` order (FR12) — the write tool calls, the
+ * approvals answered, and the DQ results the run/lineage view renders.
+ */
+export async function getSessionLineage(sessionId: string): Promise<LineageEvent[]> {
+  const res = await fetch(`/api/sessions/${sessionId}/lineage`);
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load lineage"));
+  }
+  const body = (await res.json()) as { lineage: LineageEvent[] };
+  return body.lineage;
+}
+
 /** Rename a session (title required) and return the updated row (FR1). */
 export async function renameSession(id: string, title: string): Promise<Session> {
   const res = await fetch(`/api/sessions/${id}`, {

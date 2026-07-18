@@ -126,9 +126,9 @@ export async function renameSession(
 }
 
 /**
- * Delete a session and its entire message history. Returns `true` if a session existed (so a
- * caller can 404 on a false), `false` otherwise. Messages are removed first so no orphaned
- * transcript rows survive their session.
+ * Delete a session and its entire message history and lineage. Returns `true` if a session
+ * existed (so a caller can 404 on a false), `false` otherwise. The child rows (transcript
+ * messages, lineage/audit events) are removed first so nothing orphaned survives their session.
  */
 export async function deleteSession(
   store: WarehouseStore,
@@ -139,6 +139,7 @@ export async function deleteSession(
     return false;
   }
   await store.run(`DELETE FROM platform.messages WHERE session_id = $1`, [id]);
+  await store.run(`DELETE FROM platform.lineage WHERE session_id = $1`, [id]);
   await store.run(`DELETE FROM platform.sessions WHERE id = $1`, [id]);
   return true;
 }

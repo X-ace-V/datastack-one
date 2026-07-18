@@ -45,7 +45,7 @@ export function App() {
         )}
       </main>
 
-      <DataPanel state={store.activeState} />
+      <DataPanel state={store.activeState} sessionId={store.activeSessionId} />
     </div>
   );
 }
