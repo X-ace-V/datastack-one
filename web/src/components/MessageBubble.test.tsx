@@ -43,13 +43,37 @@ describe("MessageBubble", () => {
     expect(paragraphs[1]?.textContent).toBe("4 branches.");
   });
 
-  it("renders nothing for a text-less assistant turn (tool-only, until V2.5)", () => {
+  it("renders a text-less assistant turn's tool and reasoning blocks (V2.5)", () => {
     const message: AssistantMessage = {
       role: "assistant",
       id: "a2",
       blocks: [
         { kind: "tool", callID: "c1", tool: "run_query", status: "running" },
         { kind: "reasoning", partID: "r1", text: "planning the query" },
+      ],
+    };
+    const { container } = render(<MessageBubble message={message} />);
+
+    const wrapper = container.querySelector('[data-role="assistant"]');
+    expect(wrapper).toBeTruthy();
+    const tool = wrapper!.querySelector('[data-role="tool"]');
+    expect(tool?.getAttribute("data-tool")).toBe("run_query");
+    expect(tool?.getAttribute("data-status")).toBe("running");
+    expect(screen.getByText("Thinking")).toBeTruthy();
+  });
+
+  it("renders nothing for an assistant turn with only a V2.6 approval seam", () => {
+    const message: AssistantMessage = {
+      role: "assistant",
+      id: "a3",
+      blocks: [
+        {
+          kind: "approval",
+          requestID: "req-1",
+          approvalType: "run_transform",
+          metadata: {},
+          status: "pending",
+        },
       ],
     };
     const { container } = render(<MessageBubble message={message} />);
