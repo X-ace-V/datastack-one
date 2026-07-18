@@ -5,15 +5,17 @@ English, and an agent does the data-engineering work — profiling, SQL, quality
 serving — with a human approval gate in front of every write.
 
 This repo is the **local-first MVP**: a localhost web app where you talk to the agent in a
-chat session, and it calls real tools against real DuckDB and real Parquet. No mocked demo
-path.
+chat session, and it calls real tools against real DuckDB, real Parquet, and a real
+read-only Postgres attach. No mocked demo path.
 
-> **Being rebuilt.** The first version of this app was a six-step button wizard driven by a
-> deterministic runner. The engine was right; the shell was not — DataStack One is meant to be
-> a conversational, session-based agent, so the wizard pages and the runner have been removed
-> and the chat shell is going in. **The web app is empty right now.** The backend, the data
-> tools, and the warehouse all still work and are covered by the suite. See
-> [`PRD.md`](./PRD.md) for the contract being built to.
+> **Conversational agent.** The first version of this app was a six-step button wizard driven
+> by a deterministic runner. The engine was right; the shell was not — DataStack One is a
+> conversational, session-based agent, so the wizard pages and the runner were removed and the
+> chat shell replaced them. You now open a session, upload a CSV or attach a Postgres, and ask
+> in plain English; an embedded [OpenCode](https://opencode.ai) agent plans and calls the data
+> tools live, streaming every step into the chat and pausing inline for your approval before
+> any write. See [`PRD.md`](./PRD.md) for the contract and [`DEMO.md`](./DEMO.md) for a
+> walkthrough.
 
 ---
 
@@ -27,12 +29,18 @@ npm install          # installs deps, incl. the `opencode` agent binary
 npm run dev          # backend on :3001, web app on :5173
 ```
 
-The web app on **<http://localhost:5173>** currently renders nothing. The backend is real:
+Open **<http://localhost:5173>** — a three-pane shell: the **session sidebar** (left), the
+**chat stream** (center), and the **data panel** (right). Create a session, upload a CSV, and
+ask a question; the agent's reasoning, tool calls, inline approvals, and query results stream
+in live. The backend is real too:
 
 ```bash
 curl localhost:3001/api/health          # {"status":"ok","service":"datastack-one",...}
 curl localhost:3001/api/models          # the live model catalog
 ```
+
+See [`DEMO.md`](./DEMO.md) for the end-to-end walkthrough (upload → ask → build → publish →
+serve), including how to attach a live Postgres.
 
 ### Scripts
 
@@ -48,20 +56,30 @@ curl localhost:3001/api/models          # the live model catalog
 
 ## What actually runs
 
-The **data tools** are the engine, and they are what the agent will call. Each is a plain
-function over DuckDB today; every tool that writes or executes is approval-gated.
+The **data tools** are the agent's only way to touch data — a fixed, audited capability set it
+calls conversationally. They live in one `@opencode-ai/plugin`
+(`server/tools/plugin.ts`) that OpenCode loads; each `execute()` reaches DuckDB over a loopback
+route (`/api/internal/tools/*`) so a credential or on-disk path never crosses into the model's
+runtime. The agent chooses the *order*; the tool set fixes the *capabilities*. Every tool that
+writes or executes is approval-gated.
 
 | Tool | Approval | What it does |
 |------|----------|--------------|
-| `profile_source` | — | `read_csv_auto` over an upload: schema, types, rows, null %, candidate keys, date columns. |
+| `list_sources` | — | The session's connected sources, by name + schema — never a path or URL. |
+| `profile_source` | — | `read_csv_auto` over a source: schema, types, rows, null %, candidate keys, date columns. |
+| `run_query` | — | A read-only `SELECT` over DuckDB (+ any attached Postgres); returns rows to the data panel. |
+| `attach_source` | **ask** | ATTACH a registered Postgres by **name**, read-only; the backend resolves name→URL — the tool never sees the secret. |
 | `land_parquet` | **ask** | `COPY … TO … (FORMAT PARQUET)` into `data/landing/`, partitioned by ingestion date. |
 | `load_warehouse` | **ask** | Parquet → `raw.source`, reporting the row count loaded. |
 | `run_transform` | **ask** | Executes the reviewed SQL verbatim into `marts.<table>`. |
-| `run_dq_check` | — | Runs data-quality checks; a failure is what blocks a publish. |
+| `run_dq_check` | — | Runs data-quality checks; a failing run blocks a later publish for the session. |
 | `publish_serving` | **ask** | Exports the CSV snapshot and registers the REST endpoint. |
 
-**The approval gate is the point.** Nothing that writes runs without an explicit human
-decision, and the approval shows the exact SQL first.
+**The approval gate is the point.** Each write pauses the turn with an inline Allow/Deny that
+shows the exact SQL/DDL first; nothing writes or attaches without an explicit human decision.
+OpenCode does not gate custom plugin tools, so the gate is enforced backend-side: the write's
+loopback route opens a pending approval and awaits `POST /api/approvals/:requestID` before it
+executes.
 
 **The served endpoints read the published CSV snapshot**, not the live `marts` table, so a
 later run whose checks failed cannot leak un-published rows to REST callers.
@@ -77,8 +95,8 @@ the catalog or is honestly absent.
 
 ## HTTP API
 
-The wizard-era surface plus the v2 session routes. The chat-turn and event-stream routes the
-conversational shell also needs are not built yet.
+The full conversational surface: sessions, the chat turn, the SSE event stream, sources,
+connections, approvals, the served endpoints, and the model catalog.
 
 | Route | Purpose |
 |-------|---------|
@@ -127,7 +145,7 @@ server/
   opencode/    the embedded agent runtime: client, model catalog, event bridge, permissions
   serving/     the dynamic served-table reader
   app.ts       the Fastify server (routes + status mapping); index.ts wires the real deps
-web/src/       React 19 + Vite + Tailwind v4 — the chat shell (being built)
+web/src/       React 19 + Vite + Tailwind v4 — the chat shell (sidebar · chat stream · data panel)
 fixtures/      synthetic lending CSV + the plain-English rules doc (committed)
 tests/         cross-cutting suites
 data/          warehouse, landing, uploads, artifacts, serving exports (gitignored, disposable)
@@ -160,9 +178,13 @@ a free model.
 | [`PRD.md`](./PRD.md) | Engineering build contract — MVP scope, FRs, standards, acceptance. |
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | System design — processes, folders, tools, data/approval/event flows. |
 | [`AGENTS.md`](./AGENTS.md) | Agent rules + the accumulated lessons of the build. |
+| [`DEMO.md`](./DEMO.md) | End-to-end walkthrough + live-Postgres (Neon) setup. |
 
 ## Status
 
-**Mid-rebuild.** The v1 wizard shipped, worked, and proved the engine end to end on the free
-model — then it was removed, because a form is the wrong interface for this product. What
-stands today is the backend engine and its tests; the conversational shell is next.
+**MVP complete.** The conversational shell is live end to end: create a session, upload a CSV,
+ask in plain English, and the agent profiles, queries, and — with an inline approval on every
+write — builds and publishes a served report, all streamed into the chat. The PRD §5 acceptance
+criteria are asserted by `tests/acceptance.test.ts`, which replays a captured free-model
+(`opencode/big-pickle`) run against the real DuckDB path. The v1 wizard that proved the engine
+was removed; a form was the wrong interface for this product.
