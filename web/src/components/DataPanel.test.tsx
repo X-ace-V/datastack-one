@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { DataPanel } from "./DataPanel";
 import { createEmptySessionState, type SessionLiveState } from "../store/sessionStore";
 
@@ -163,6 +163,46 @@ describe("DataPanel", () => {
     // The schema's column and the query's value both render.
     expect(screen.getAllByText("loan_id").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("north")).toBeTruthy();
+  });
+
+  it("renders published endpoints from a publish_serving tool event", () => {
+    const state: SessionLiveState = {
+      ...createEmptySessionState(),
+      messages: [
+        { role: "user", id: "u1", content: "publish a branch report" },
+        {
+          role: "assistant",
+          id: "a1",
+          blocks: [
+            {
+              kind: "tool",
+              callID: "pub1",
+              tool: "publish_serving",
+              status: "completed",
+              metadata: {
+                publish: {
+                  name: "branch_report",
+                  endpoint: "/api/serve/branch_report",
+                  csvEndpoint: "/api/serve/branch_report.csv",
+                  rowCount: 4,
+                },
+              },
+            },
+          ],
+        },
+      ],
+    };
+    render(<DataPanel state={state} />);
+    expect(screen.getByText("Endpoints")).toBeTruthy();
+    const region = screen.getByRole("region", { name: "Published endpoints" });
+    expect(within(region).getByText("branch_report")).toBeTruthy();
+    expect(within(region).getByRole("link", { name: "REST" }).getAttribute("href")).toBe(
+      "/api/serve/branch_report",
+    );
+    expect(within(region).getByRole("link", { name: "CSV" }).getAttribute("href")).toBe(
+      "/api/serve/branch_report.csv",
+    );
+    expect(screen.queryByText(/Schema, query results, and endpoints appear here/)).toBeNull();
   });
 
   it("keeps its Data panel landmark and heading", () => {
