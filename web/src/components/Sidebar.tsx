@@ -22,13 +22,15 @@ export interface SidebarProps {
   activeSessionId: string | null;
   /** Report a selection change up to the shell (a new id, a switch, or null on delete). */
   onSelectSession: (sessionId: string | null) => void;
+  /** Open the Settings → Connections panel (V5.3). Optional so the sidebar renders standalone. */
+  onOpenSettings?: () => void;
 }
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function Sidebar({ activeSessionId, onSelectSession }: SidebarProps) {
+export function Sidebar({ activeSessionId, onSelectSession, onOpenSettings }: SidebarProps) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -246,6 +248,16 @@ export function Sidebar({ activeSessionId, onSelectSession }: SidebarProps) {
           </ul>
         )}
       </div>
+
+      <footer className="border-t border-slate-200 px-2 py-2">
+        <button
+          type="button"
+          onClick={() => onOpenSettings?.()}
+          className="w-full rounded px-2 py-1 text-left text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+        >
+          Settings · Connections
+        </button>
+      </footer>
     </nav>
   );
 }

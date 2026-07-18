@@ -68,6 +68,29 @@ export function toSessionSourceView(source: SessionSource): SessionSourceView {
 }
 
 /**
+ * The `kind` a registered-Postgres session source carries (V5.3, FR5b). A source is a `csv` (an
+ * uploaded file exposed as a DuckDB view) or a `postgres` table exposed through a read-only ATTACH
+ * of a registered connection. `run_query` only builds a CSV view for the `csv` kind — a `postgres`
+ * source is already queryable by its qualified name through the persistent ATTACH (V5.2).
+ */
+export const POSTGRES_SOURCE_KIND = "postgres";
+
+/**
+ * The name the agent references an attached Postgres table by (V5.3, FR5b): the fully-qualified
+ * `<alias>.<schema>.<table>`, where `alias` is the registered connection name. This is exactly the
+ * identifier `run_query` resolves against the attached catalog, so registering an attached table
+ * under this name makes `list_sources` surface it and `run_query` join it — with no path or
+ * credential ever attached to the model-facing view.
+ */
+export function attachedTableName(
+  alias: string,
+  schema: string,
+  table: string,
+): string {
+  return `${alias}.${schema}.${table}`;
+}
+
+/**
  * Derive a source name from an uploaded filename (V3.2). Drops any directory components and the
  * trailing `.csv`, replaces every run of characters outside `[A-Za-z0-9_]` with a single `_`,
  * and trims leading/trailing underscores. The agent addresses the source by this name and V3.3's

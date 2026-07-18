@@ -104,6 +104,53 @@ describe("attach_source route", () => {
     expect(JSON.stringify(lineage)).not.toContain("hunter2");
   });
 
+  it("registers the attached tables so list_sources includes them by qualified name (V5.3)", async () => {
+    const { app, store } = await fixtures();
+    await addConnection(store, { name: "neon", type: "postgres", url: SECRET_URL });
+
+    const attached = await app.inject({
+      method: "POST",
+      url: "/api/internal/tools/attach_source",
+      payload: { sessionID: "ses_1", name: "neon" },
+    });
+    expect(attached.statusCode).toBe(200);
+
+    // list_sources for the session now surfaces each attached table as a `postgres` source, named
+    // by its qualified `<alias>.<schema>.<table>` — the identifier run_query resolves (FR5b).
+    const listed = await app.inject({
+      method: "POST",
+      url: "/api/internal/tools/list_sources",
+      payload: { sessionID: "ses_1" },
+    });
+    expect(listed.statusCode).toBe(200);
+    const { sources } = listed.json() as {
+      sources: { name: string; kind: string; rowCount: number | null }[];
+    };
+    expect(sources).toEqual(
+      expect.arrayContaining([
+        { name: "neon.public.loans", kind: "postgres", rowCount: null },
+        { name: "neon.public.branches", kind: "postgres", rowCount: null },
+      ]),
+    );
+    // The model-facing list still carries no credential.
+    expect(listed.body).not.toContain("hunter2");
+    expect(listed.body).not.toContain(SECRET_URL);
+
+    // A re-attach is idempotent: the tables are upserted, not duplicated.
+    await app.inject({
+      method: "POST",
+      url: "/api/internal/tools/attach_source",
+      payload: { sessionID: "ses_1", name: "neon" },
+    });
+    const relisted = await app.inject({
+      method: "POST",
+      url: "/api/internal/tools/list_sources",
+      payload: { sessionID: "ses_1" },
+    });
+    const relistedSources = (relisted.json() as { sources: { name: string }[] }).sources;
+    expect(relistedSources.filter((s) => s.name === "neon.public.loans")).toHaveLength(1);
+  });
+
   it("never exposes the URL in the inline approval event (SSE)", async () => {
     // Use a gate that does NOT auto-answer, so the approval stays pending while we inspect it.
     const store = await openStore(":memory:");

@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { DataPanel } from "./components/DataPanel";
+import { ConnectionsPanel } from "./components/ConnectionsPanel";
 import { useEvents } from "./hooks/useEvents";
 import { useSessionStore } from "./store/sessionStore";
 
@@ -20,12 +22,15 @@ export function App() {
   const store = useSessionStore();
   // One EventSource for the whole app; the store routes each event to its session by sessionID.
   useEvents({ onEvent: store.handleEvent });
+  // Settings → Connections opens as a modal overlay above the conversation (V5.3), not a route.
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
-    <div className="grid h-screen grid-cols-[16rem_1fr_22rem] bg-slate-50 text-slate-900">
+    <div className="relative grid h-screen grid-cols-[16rem_1fr_22rem] bg-slate-50 text-slate-900">
       <Sidebar
         activeSessionId={store.activeSessionId}
         onSelectSession={store.setActiveSession}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <main
@@ -46,6 +51,8 @@ export function App() {
       </main>
 
       <DataPanel state={store.activeState} sessionId={store.activeSessionId} />
+
+      {settingsOpen && <ConnectionsPanel onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }

@@ -321,6 +321,89 @@ export async function answerApproval(
   return (await res.json()) as ApprovalResult;
 }
 
+/**
+ * A registered database connection, mirroring the backend `ConnectionSchema` (FR5). The
+ * credentialed `url` is deliberately absent from the shape — it is entered once in the Settings →
+ * Connections panel, posts to the server, and never comes back, so the browser cannot leak it.
+ */
+export interface Connection {
+  name: string;
+  type: string;
+  createdAt: string;
+}
+
+/** Fields accepted by `POST /api/connections`; `type` defaults to `postgres` server-side. */
+export interface CreateConnectionInput {
+  name: string;
+  url: string;
+  type?: string;
+}
+
+/** The outcome of a test-connection probe, mirroring the backend `ConnectionTestResultSchema`. */
+export interface ConnectionTestResult {
+  ok: boolean;
+  error: string | null;
+}
+
+/**
+ * List the registered connections (FR5), name/type/createdAt only. The response never carries a
+ * secret — the backend's list shape has no `url` field — so this is safe to hold in the browser.
+ */
+export async function listConnections(): Promise<Connection[]> {
+  const res = await fetch("/api/connections");
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load connections"));
+  }
+  const body = (await res.json()) as { connections: Connection[] };
+  return body.connections ?? [];
+}
+
+/**
+ * Register a database connection (FR5). This is the ONLY call a credentialed URL is sent on; it
+ * posts to the server, which stores the secret gitignored server-side and returns the secret-free
+ * view. The caller must clear the URL from its own state after this resolves.
+ */
+export async function createConnection(
+  input: CreateConnectionInput,
+): Promise<Connection> {
+  const res = await fetch("/api/connections", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to add connection"));
+  }
+  const body = (await res.json()) as { connection: Connection };
+  return body.connection;
+}
+
+/** Remove a registered connection by name (FR5). Resolves on the 204 No Content. */
+export async function deleteConnection(name: string): Promise<void> {
+  const res = await fetch(`/api/connections/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to remove connection"));
+  }
+}
+
+/**
+ * Test a registered connection (FR5). The backend resolves the name → its stored URL and probes it
+ * read-only; the result carries only `{ ok, error }` with any credential scrubbed — the URL never
+ * leaves the server, so the browser learns whether the connection works without ever seeing it.
+ */
+export async function testConnection(name: string): Promise<ConnectionTestResult> {
+  const res = await fetch(`/api/connections/${encodeURIComponent(name)}/test`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to test connection"));
+  }
+  const body = (await res.json()) as { result: ConnectionTestResult };
+  return body.result;
+}
+
 /** List all projects, newest first. */
 export async function listProjects(): Promise<Project[]> {
   const res = await fetch("/api/projects");

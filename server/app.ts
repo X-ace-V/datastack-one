@@ -46,6 +46,8 @@ import { DEFAULT_SERVING_DIR, publishServing } from "./tools/serve.js";
 import { safeDatasetName } from "./core/landing.js";
 import { getSessionSource, registerSessionSource } from "./store/session-sources.js";
 import {
+  attachedTableName,
+  POSTGRES_SOURCE_KIND,
   sourceNameFromFilename,
   toSessionSourceView,
 } from "./core/session-sources.js";
@@ -1510,6 +1512,20 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         alias: parsed.data.name,
         url: stored.url,
       });
+      // Surface each attached table to the agent through `list_sources` (V5.3, FR5b): register it as
+      // a `postgres` session source under its qualified `<alias>.<schema>.<table>` name — the exact
+      // identifier `run_query` resolves against the persistent ATTACH. The registry stores no URL
+      // (the path field carries the qualified name, a non-secret backend resolution target), so the
+      // credential still never crosses to the model. Re-attach is idempotent (upsert on name).
+      for (const table of result.tables) {
+        const name = attachedTableName(parsed.data.name, table.schema, table.table);
+        await registerSessionSource(deps.store, {
+          sessionId: parsed.data.sessionID,
+          name,
+          kind: POSTGRES_SOURCE_KIND,
+          path: name,
+        });
+      }
       await recordToolCallLineage(parsed.data.sessionID, "attach_source", "completed", {
         connection: parsed.data.name,
         tableCount: result.tables.length,

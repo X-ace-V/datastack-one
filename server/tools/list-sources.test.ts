@@ -37,4 +37,28 @@ describe("list_sources tool", () => {
     expect(listed).toEqual([{ name: "loans", kind: "csv", rowCount: 24 }]);
     expect(JSON.stringify(listed)).not.toContain("secret");
   });
+
+  it("includes attached Postgres tables by their qualified name (V5.3)", async () => {
+    const s = await store();
+    // An attach_source (V5.2) registers each attached table as a `postgres` session source under
+    // its qualified `<alias>.<schema>.<table>` name — the identifier run_query resolves. list_sources
+    // must surface it alongside CSV sources so the agent can address the PG tables by name (FR5b).
+    await registerSessionSource(s, {
+      sessionId: "ses_1",
+      name: "loans_csv",
+      path: "/tmp/loans.csv",
+    });
+    await registerSessionSource(s, {
+      sessionId: "ses_1",
+      name: "neon.public.borrowers",
+      kind: "postgres",
+      path: "neon.public.borrowers",
+    });
+
+    const listed = await listSourcesForSession(s, "ses_1");
+    const pg = listed.find((src) => src.name === "neon.public.borrowers");
+    expect(pg).toEqual({ name: "neon.public.borrowers", kind: "postgres", rowCount: null });
+    // The qualified name is not a path, but the model-safe view still carries no `path` field at all.
+    expect(pg && "path" in pg).toBe(false);
+  });
 });

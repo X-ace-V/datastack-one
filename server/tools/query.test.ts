@@ -114,6 +114,41 @@ describe("run_query tool (read-only SELECT over DuckDB)", () => {
     ]);
   });
 
+  it("joins a CSV source to an attached (Postgres-style) table by qualified name (V5.3)", async () => {
+    const store = await freshStore();
+    await seedLoans(store);
+
+    // Model a registered Postgres attached read-only (V5.2): attach a second DuckDB catalog and put
+    // a table in it, then register it as a `postgres` session source under its qualified name — the
+    // exact shape the attach_source route produces. run_query does NOT build a view for a non-CSV
+    // source; the attached catalog table is resolved directly by its qualified name.
+    const catalogDir = await mkdtemp(join(tmpdir(), "pg-"));
+    tempDirs.push(catalogDir);
+    await store.run(`ATTACH '${join(catalogDir, "neon.duckdb")}' AS neon`);
+    await store.run("CREATE TABLE neon.main.branches (branch VARCHAR, region VARCHAR)");
+    await store.run("INSERT INTO neon.main.branches VALUES ('north','NE'),('south','SE')");
+    await registerSessionSource(store, {
+      sessionId: "ses_1",
+      name: "neon.main.branches",
+      kind: "postgres",
+      path: "neon.main.branches",
+    });
+
+    const result = await runQuery(store, {
+      sessionId: "ses_1",
+      sql:
+        "SELECT b.region, COUNT(*) AS loans FROM loans l " +
+        "JOIN neon.main.branches b ON l.branch = b.branch GROUP BY b.region ORDER BY b.region",
+    });
+
+    expect(result.rows).toEqual([
+      { region: "NE", loans: 2 },
+      { region: "SE", loans: 1 },
+    ]);
+
+    await store.run("DETACH neon");
+  });
+
   it("scopes source names to the querying session", async () => {
     const store = await freshStore();
     await seedLoans(store, "ses_owner");

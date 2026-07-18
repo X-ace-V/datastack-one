@@ -225,4 +225,20 @@ describe("Sidebar", () => {
     expect(within(first).getByRole("button", { name: "Rename Loan review" })).toBeTruthy();
     expect(within(second).getByRole("button", { name: "Delete Branch report" })).toBeTruthy();
   });
+
+  it("opens Settings → Connections via the footer button (V5.3)", async () => {
+    const onOpenSettings = vi.fn();
+    installFetch(() => jsonResponse(200, { sessions: [] }));
+    render(
+      <Sidebar
+        activeSessionId={null}
+        onSelectSession={() => {}}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+
+    await screen.findByText(/no sessions yet/i);
+    fireEvent.click(screen.getByRole("button", { name: /settings . connections/i }));
+    expect(onOpenSettings).toHaveBeenCalled();
+  });
 });
