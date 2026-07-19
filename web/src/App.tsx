@@ -10,15 +10,16 @@ import { getSession } from "./lib/api";
 
 /**
  * Application root — the frame the conversational shell renders inside: a session sidebar
- * (left), the chat stream (center), and the data panel (right).
+ * (left), the chat stream (center), and a contextual data panel that slides in only when the
+ * active session has a schema, query result, endpoint, or audit event.
  *
  * The v1 wizard's six step routes lived here and were removed with their pages. This is the v2
  * shell: one screen driven by the active session rather than a route per step. The live-state
  * store (V2.1) holds every session's transcript; one SSE subscription (V2.2) folds the whole
  * app's chat stream into it; the sidebar (V2.3) owns the session list and selects the active
  * session; the chat pane (V2.4) renders that session's turns and sends new ones; the data panel
- * (V3.3) renders the latest `run_query` result in the right region. Each region is a landmark with
- * an accessible name so the layout is navigable and testable region by region.
+ * (V3.3) renders the latest `run_query` result in the right region. Visible regions are named
+ * landmarks so the layout is navigable and testable region by region.
  */
 export function App() {
   const store = useSessionStore();
@@ -26,6 +27,7 @@ export function App() {
   useEvents({ onEvent: store.handleEvent });
   // Settings → Connections opens as a modal overlay above the conversation (V5.3), not a route.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dataPanelOpen, setDataPanelOpen] = useState(false);
 
   // The sidebar is driven by the same central index that global SSE events update, so an
   // inactive session can change title/status without forcing a refetch or being selected.
@@ -68,7 +70,10 @@ export function App() {
   }, [activeSessionId, getState, hydrateSession]);
 
   return (
-    <div className="relative grid h-screen grid-cols-[16rem_1fr_22rem] bg-slate-50 text-slate-900">
+    <div
+      className="app-shell relative grid h-screen overflow-hidden bg-slate-50 text-slate-900"
+      data-data-open={dataPanelOpen ? "true" : "false"}
+    >
       <Sidebar
         activeSessionId={store.activeSessionId}
         onSelectSession={store.setActiveSession}
@@ -83,17 +88,27 @@ export function App() {
 
       <main
         aria-label="Chat"
-        className="flex flex-col overflow-hidden bg-slate-50"
+        className="relative flex min-w-0 flex-col overflow-hidden bg-[radial-gradient(circle_at_50%_-20%,rgba(139,92,246,0.09),transparent_32rem)]"
       >
         {store.activeSessionId ? (
           <>
-            <div className="border-b border-slate-200 bg-white px-4 py-2">
+            <header className="flex min-h-16 items-center justify-between gap-4 border-b border-slate-200/80 bg-white/80 px-6 py-3 backdrop-blur-xl">
+              <div className="min-w-0">
+                <h2 className="truncate text-sm font-semibold text-slate-900">
+                  {store.sessions.find((session) => session.id === store.activeSessionId)?.title ?? "Session"}
+                </h2>
+                <p className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-500">
+                  <span className={`h-1.5 w-1.5 rounded-full ${store.activeState.isWorking ? "animate-pulse bg-violet-500" : "bg-emerald-500"}`} />
+                  {store.activeState.isWorking ? "Agent is working" : "Ready"}
+                </p>
+              </div>
               {/* Per-session model picker (V6.1): reflects and updates the active session's model. */}
               <SessionModelControl
                 sessionId={store.activeSessionId}
                 disabled={store.activeState.isWorking}
+                compact
               />
-            </div>
+            </header>
             <ChatPane
               sessionId={store.activeSessionId}
               state={store.activeState}
@@ -109,13 +124,35 @@ export function App() {
             />
           </>
         ) : (
-          <div className="flex flex-1 items-center justify-center px-6 text-sm text-slate-400">
-            Start a session to chat with the agent
+          <div className="flex flex-1 items-center justify-center px-6">
+            <div className="max-w-lg text-center">
+              <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-violet-100 text-violet-700 shadow-sm" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" className="h-8 w-8" stroke="currentColor" strokeWidth="1.6">
+                  <path d="M4 7.5 12 3l8 4.5-8 4.5-8-4.5Z" />
+                  <path d="m4 12 8 4.5 8-4.5M4 16.5 12 21l8-4.5" />
+                </svg>
+              </span>
+              <h2 className="mt-5 text-2xl font-semibold tracking-tight text-slate-900">Build with your data</h2>
+              <p className="mt-2 text-sm leading-6 text-slate-500">
+                Start a session, connect a working folder, and let the data engineering agent profile, query, and ship your work.
+              </p>
+              <button
+                type="button"
+                onClick={() => void store.createSession().then((session) => store.setActiveSession(session.id))}
+                className="mt-6 rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition hover:-translate-y-0.5 hover:bg-violet-700"
+              >
+                Start a new session
+              </button>
+            </div>
           </div>
         )}
       </main>
 
-      <DataPanel state={store.activeState} sessionId={store.activeSessionId} />
+      <DataPanel
+        state={store.activeState}
+        sessionId={store.activeSessionId}
+        onVisibilityChange={setDataPanelOpen}
+      />
 
       {settingsOpen && <ConnectionsPanel onClose={() => setSettingsOpen(false)} />}
     </div>

@@ -92,9 +92,10 @@ describe("DataPanel", () => {
     };
   }
 
-  it("shows the placeholder before any query has run", () => {
-    render(<DataPanel state={createEmptySessionState()} />);
-    expect(screen.getByText(/Schema, query results, and endpoints appear here/)).toBeTruthy();
+  it("stays hidden before any data or audit event exists", () => {
+    const { container } = render(<DataPanel state={createEmptySessionState()} />);
+    expect(screen.queryByRole("complementary", { name: "Data panel" })).toBeNull();
+    expect(container.querySelector('aside[data-open="false"]')).toBeTruthy();
     expect(screen.queryByRole("table")).toBeNull();
   });
 
@@ -205,10 +206,10 @@ describe("DataPanel", () => {
     expect(screen.queryByText(/Schema, query results, and endpoints appear here/)).toBeNull();
   });
 
-  it("keeps its Data panel landmark and heading", () => {
-    render(<DataPanel state={createEmptySessionState()} />);
+  it("exposes its landmark and heading only when it has data", () => {
+    render(<DataPanel state={stateWithQuery()} />);
     expect(screen.getByRole("complementary", { name: "Data panel" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Data" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Workspace data" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /attach|upload|folder/i })).toBeNull();
   });
 
@@ -235,10 +236,10 @@ describe("DataPanel", () => {
     vi.stubGlobal("fetch", fetchMock);
     try {
       render(<DataPanel state={createEmptySessionState()} sessionId="ses_1" />);
-      // The audit-trail region shows even with no store-derived content (not the placeholder).
-      const region = screen.getByRole("region", { name: "Audit trail" });
+      // Persisted lineage is discovered in the background, then reveals the panel and trail.
+      const region = await screen.findByRole("region", { name: "Audit trail" });
       expect(region).toBeTruthy();
-      expect(screen.queryByText(/Schema, query results, and endpoints appear here/)).toBeNull();
+      expect(screen.getByRole("complementary", { name: "Data panel" })).toBeTruthy();
       await waitFor(() =>
         expect(within(region).getByText("publish_serving")).toBeTruthy(),
       );

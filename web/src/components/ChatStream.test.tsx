@@ -23,7 +23,7 @@ describe("ChatStream", () => {
 
   it("renders the empty prompt when there are no messages and nothing is in flight", () => {
     render(<ChatStream messages={[]} isWorking={false} error={null} />);
-    expect(screen.getByText(/ask the agent to profile/i)).toBeTruthy();
+    expect(screen.getByText(/connect a project folder or upload a dataset/i)).toBeTruthy();
   });
 
   it("renders user and assistant turns in order", () => {

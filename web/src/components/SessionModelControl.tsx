@@ -17,13 +17,15 @@ export interface SessionModelControlProps {
   sessionId: string;
   /** Disable the picker while a turn is in flight (the model is read per prompt). */
   disabled?: boolean;
+  /** Use the compact control intended for the conversation header. */
+  compact?: boolean;
 }
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function SessionModelControl({ sessionId, disabled = false }: SessionModelControlProps) {
+export function SessionModelControl({ sessionId, disabled = false, compact = false }: SessionModelControlProps) {
   const [model, setModel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -65,7 +67,7 @@ export function SessionModelControl({ sessionId, disabled = false }: SessionMode
 
   return (
     <div>
-      <ModelPicker value={model} onChange={handleChange} disabled={disabled || saving} />
+      <ModelPicker value={model} onChange={handleChange} disabled={disabled || saving} compact={compact} />
       {error && (
         <p role="alert" className="mt-1 text-xs text-red-600">
           {error}

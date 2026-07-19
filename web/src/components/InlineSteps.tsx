@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { InlineBlock } from "../store/sessionStore";
 import { ApprovalPill } from "./ApprovalPill";
+import { MarkdownText } from "./MarkdownText";
 import { ToolCard } from "./ToolCard";
 
 /**
@@ -19,12 +20,12 @@ function ReasoningSection({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
   if (text.length === 0) return null;
   return (
-    <div data-role="reasoning">
+    <div data-role="reasoning" className="rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2">
       <button
         type="button"
         onClick={() => setExpanded((p) => !p)}
         aria-expanded={expanded}
-        className="flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-slate-600"
+        className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 transition-colors hover:text-slate-700"
       >
         Thinking
         <svg
@@ -47,14 +48,12 @@ function ReasoningSection({ text }: { text: string }) {
 
 export function InlineSteps({ blocks }: InlineStepsProps) {
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-3">
       {blocks.map((block) => {
         switch (block.kind) {
           case "text":
             return block.text.length === 0 ? null : (
-              <p key={block.partID} className="whitespace-pre-wrap">
-                {block.text}
-              </p>
+              <MarkdownText key={block.partID} text={block.text} />
             );
           case "reasoning":
             return <ReasoningSection key={block.partID} text={block.text} />;

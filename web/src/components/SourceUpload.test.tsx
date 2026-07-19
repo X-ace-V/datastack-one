@@ -16,7 +16,7 @@ describe("SourceUpload composer menu", () => {
       new File(["a,b\n1,2"], "loans.csv", { type: "text/csv" }),
       new File(["select 1"], "model.sql", { type: "text/plain" }),
     ];
-    fireEvent.change(screen.getByLabelText("Upload files"), { target: { files } });
+    fireEvent.change(screen.getByLabelText("Choose files to upload"), { target: { files } });
     expect(onFiles).toHaveBeenCalledWith(files);
   });
 

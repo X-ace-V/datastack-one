@@ -39,7 +39,8 @@ describe("MessageBubble", () => {
     expect(wrapper?.className).toContain("justify-start");
     const paragraphs = wrapper!.querySelectorAll("p");
     expect(paragraphs).toHaveLength(2);
-    expect(paragraphs[0]?.textContent).toBe("The loans table has ");
+    // Markdown normalizes a trailing space at the end of a streamed part.
+    expect(paragraphs[0]?.textContent).toBe("The loans table has");
     expect(paragraphs[1]?.textContent).toBe("4 branches.");
   });
 

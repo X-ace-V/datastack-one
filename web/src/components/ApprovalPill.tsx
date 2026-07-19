@@ -81,13 +81,14 @@ export function ApprovalPill({ block }: ApprovalPillProps) {
 
   return (
     <div
-      className="rounded-lg border border-amber-200 bg-amber-50/60 text-sm"
+      className="overflow-hidden rounded-xl border border-amber-200 bg-amber-50/70 text-sm shadow-sm"
       data-role="approval"
       data-approval-type={block.approvalType}
       data-status={status}
     >
-      <div className="flex items-center gap-2 px-3 py-2">
-        <span className="font-mono text-xs font-medium text-slate-700">{block.approvalType}</span>
+      <div className="flex items-center gap-2.5 px-3 py-2.5">
+        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-amber-100 text-amber-700" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" stroke="currentColor" strokeWidth="1.9"><path d="M12 3 4.5 6v5.5c0 4.5 3.2 7.7 7.5 9.5 4.3-1.8 7.5-5 7.5-9.5V6L12 3Z" /><path d="m9 12 2 2 4-4" /></svg></span>
+        <span className="font-mono text-xs font-semibold text-slate-700">{block.approvalType}</span>
         <span
           className={`ml-auto shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${badge.className}`}
           data-testid="approval-status"
@@ -99,19 +100,19 @@ export function ApprovalPill({ block }: ApprovalPillProps) {
       {sql.length > 0 && (
         <pre
           data-testid="approval-sql"
-          className="mx-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-white px-2 py-1 font-mono text-[11px] text-slate-600"
+          className="mx-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-amber-100 bg-white px-3 py-2 font-mono text-[11px] leading-5 text-slate-600"
         >
           {sql}
         </pre>
       )}
 
       {status === "pending" ? (
-        <div className="flex items-center gap-2 px-3 py-2">
+        <div className="flex items-center gap-2 px-3 py-3">
           <button
             type="button"
             onClick={() => void decide("approve")}
             disabled={busy}
-            className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+            className="rounded-lg bg-slate-950 px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-50"
           >
             Allow
           </button>
@@ -119,7 +120,7 @@ export function ApprovalPill({ block }: ApprovalPillProps) {
             type="button"
             onClick={() => void decide("reject")}
             disabled={busy}
-            className="rounded-md border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+            className="rounded-lg border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
           >
             Deny
           </button>

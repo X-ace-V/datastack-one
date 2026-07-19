@@ -46,7 +46,7 @@ export function ToolCard({ block }: ToolCardProps) {
 
   return (
     <div
-      className="rounded-lg border border-slate-200 bg-white text-sm"
+      className="overflow-hidden rounded-xl border border-slate-200/90 bg-white/90 text-sm shadow-sm"
       data-role="tool"
       data-tool={block.tool}
       data-status={block.status}
@@ -56,11 +56,14 @@ export function ToolCard({ block }: ToolCardProps) {
         onClick={expandable ? () => setExpanded((p) => !p) : undefined}
         disabled={!expandable}
         aria-expanded={expandable ? expanded : undefined}
-        className={`flex w-full items-center gap-2 px-3 py-2 text-left ${
-          expandable ? "cursor-pointer hover:bg-slate-50" : "cursor-default"
+        className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition ${
+          expandable ? "cursor-pointer hover:bg-slate-50/80" : "cursor-default"
         }`}
       >
-        <span className="font-mono text-xs font-medium text-slate-700">{block.tool}</span>
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-violet-50 text-violet-600" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" stroke="currentColor" strokeWidth="1.8"><path d="M8 9 4 12l4 3M16 9l4 3-4 3M14 5l-4 14" /></svg>
+        </span>
+        <span className="font-mono text-xs font-semibold text-slate-700">{block.tool}</span>
         {block.title && (
           <span className="min-w-0 flex-1 truncate text-xs text-slate-400">{block.title}</span>
         )}
@@ -87,7 +90,7 @@ export function ToolCard({ block }: ToolCardProps) {
       </button>
 
       {expanded && expandable && (
-        <div className="space-y-2 border-t border-slate-100 px-3 py-2">
+        <div className="space-y-3 border-t border-slate-100 bg-slate-50/40 px-3 py-3">
           {hasArgs && (
             <div>
               <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-slate-400">
@@ -95,7 +98,7 @@ export function ToolCard({ block }: ToolCardProps) {
               </div>
               <pre
                 data-testid="tool-args"
-                className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-50 px-2 py-1 font-mono text-[11px] text-slate-600"
+                className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-[11px] leading-5 text-slate-600"
               >
                 {args}
               </pre>
@@ -108,7 +111,7 @@ export function ToolCard({ block }: ToolCardProps) {
               </div>
               <pre
                 data-testid="tool-result"
-                className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-50 px-2 py-1 font-mono text-[11px] text-slate-600"
+                className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-[11px] leading-5 text-slate-600"
               >
                 {block.output}
               </pre>
@@ -121,7 +124,7 @@ export function ToolCard({ block }: ToolCardProps) {
               </div>
               <pre
                 data-testid="tool-error"
-                className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-red-50 px-2 py-1 font-mono text-[11px] text-red-600"
+                className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-red-100 bg-red-50 px-3 py-2 font-mono text-[11px] leading-5 text-red-600"
               >
                 {block.error}
               </pre>

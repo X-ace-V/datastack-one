@@ -12,8 +12,9 @@ import { App } from "./App";
 
 /**
  * V0.2/V2.4 — the three-pane agent shell, now wired to the live-state store and SSE stream.
- * The first block asserts the layout still renders its three landmark regions (session sidebar ·
- * chat · data panel). The second drives the full V2.4 chat path end to end: select a session,
+ * The first block asserts the layout renders its persistent sidebar/chat regions while the data
+ * panel stays out of the accessible layout until it has content. The second drives the full V2.4
+ * chat path end to end: select a session,
  * send a prompt, and stream an assistant text frame back through the REAL useEvents → store →
  * ChatStream → MessageBubble pipeline (only the network transports — fetch + EventSource — are
  * faked, exactly the V2.2/V2.3 boundary).
@@ -76,13 +77,13 @@ describe("App shell", () => {
     expect(chat).toBeTruthy();
   });
 
-  it("renders the data panel as a named complementary landmark", () => {
-    render(<App />);
-    const panel = screen.getByRole("complementary", { name: "Data panel" });
-    expect(panel).toBeTruthy();
+  it("keeps an empty data panel collapsed and out of the accessible layout", () => {
+    const { container } = render(<App />);
+    expect(screen.queryByRole("complementary", { name: "Data panel" })).toBeNull();
+    expect(container.firstElementChild?.getAttribute("data-data-open")).toBe("false");
   });
 
-  it("renders all three regions as siblings of one shell container", () => {
+  it("keeps the animated data panel beside the two persistent shell regions", () => {
     const { container } = render(<App />);
     const shell = container.firstElementChild;
     expect(shell).toBeTruthy();
@@ -91,8 +92,8 @@ describe("App shell", () => {
     const aside = shell?.querySelector('aside[aria-label="Data panel"]');
     expect(nav).toBeTruthy();
     expect(main).toBeTruthy();
-    expect(aside).toBeTruthy();
-    // The three panes are direct children of the same grid container, in reading order.
+    expect(aside?.getAttribute("aria-hidden")).toBe("true");
+    // The panel stays mounted for a smooth slide transition, but consumes a zero-width column.
     expect(nav?.parentElement).toBe(shell);
     expect(main?.parentElement).toBe(shell);
     expect(aside?.parentElement).toBe(shell);
@@ -168,7 +169,7 @@ describe("App chat flow (V2.4)", () => {
 
     // The sidebar lists the session; before selection the chat pane shows its placeholder.
     const sessionButton = await screen.findByRole("button", { name: "Loan review" });
-    expect(screen.getByText(/start a session to chat/i)).toBeTruthy();
+    expect(screen.getByText(/build with your data/i)).toBeTruthy();
 
     // Selecting the session mounts the composer.
     await act(async () => {
@@ -201,6 +202,38 @@ describe("App chat flow (V2.4)", () => {
     });
 
     await waitFor(() => expect(screen.getByText("There are 4 branches.")).toBeTruthy());
+
+    // The right panel is still absent until a tool delivers actual tabular data.
+    expect(screen.queryByRole("complementary", { name: "Data panel" })).toBeNull();
+    await act(async () => {
+      es!.emit(
+        "tool",
+        {
+          kind: "tool",
+          sessionID: "ses_1",
+          messageID: "asst_1",
+          partID: "tool-1",
+          callID: "call-1",
+          tool: "run_query",
+          status: "completed",
+          metadata: {
+            result: {
+              columns: [{ name: "branches", type: "BIGINT" }],
+              rows: [{ branches: 4 }],
+              rowCount: 1,
+              truncated: false,
+            },
+          },
+        },
+        2,
+      );
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("complementary", { name: "Data panel" })).toBeTruthy(),
+    );
+    expect(document.querySelector(".app-shell")?.getAttribute("data-data-open")).toBe("true");
+    expect(screen.getByRole("region", { name: "Query result" })).toBeTruthy();
   });
 });
 

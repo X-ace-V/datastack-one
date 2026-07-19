@@ -90,9 +90,12 @@ function summarize(event: LineageEvent): string | null {
 export function LineageView({
   sessionId,
   refreshKey,
+  onPresenceChange,
 }: {
   sessionId: string;
   refreshKey?: string | number;
+  /** Reports whether the durable trail contains anything, so an empty data panel can stay hidden. */
+  onPresenceChange?: (hasEvents: boolean) => void;
 }) {
   const [lineage, setLineage] = useState<LineageEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -102,15 +105,20 @@ export function LineageView({
     setError(null);
     getSessionLineage(sessionId)
       .then((events) => {
-        if (active) setLineage(events);
+        if (active) {
+          setLineage(events);
+          onPresenceChange?.(events.length > 0);
+        }
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : String(err));
+        if (active) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
       });
     return () => {
       active = false;
     };
-  }, [sessionId, refreshKey]);
+  }, [sessionId, refreshKey, onPresenceChange]);
 
   if (error) {
     return (

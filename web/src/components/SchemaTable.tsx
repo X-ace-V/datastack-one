@@ -31,7 +31,7 @@ export function SchemaTable({ profile }: { profile: SourceProfile }) {
         </div>
       </dl>
 
-      <div className="overflow-x-auto rounded-md border border-slate-200">
+      <div className="overflow-x-auto rounded-xl border border-slate-200 shadow-sm">
         <table className="min-w-full divide-y divide-slate-200 text-sm">
           <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
             <tr>
@@ -44,7 +44,7 @@ export function SchemaTable({ profile }: { profile: SourceProfile }) {
           </thead>
           <tbody className="divide-y divide-slate-100">
             {profile.columns.map((column) => (
-              <tr key={column.name}>
+              <tr key={column.name} className="transition-colors hover:bg-slate-50/80">
                 <td className="px-3 py-2 font-medium text-slate-900">{column.name}</td>
                 <td className="px-3 py-2 font-mono text-xs text-slate-600">{column.type}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-slate-700">

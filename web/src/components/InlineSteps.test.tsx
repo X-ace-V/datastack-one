@@ -33,8 +33,26 @@ describe("InlineSteps", () => {
     expect(children[1]?.getAttribute("data-role")).toBe("tool");
     expect(children[1]?.getAttribute("data-tool")).toBe("run_query");
     expect(children[1]?.getAttribute("data-status")).toBe("completed");
-    expect(children[2]?.tagName).toBe("P");
+    expect(children[2]?.classList.contains("markdown-content")).toBe(true);
+    expect(children[2]?.querySelector("p")).toBeTruthy();
     expect(children[2]?.textContent).toBe("There is one row.");
+  });
+
+  it("renders agent text as GitHub-flavoured Markdown", () => {
+    const blocks: InlineBlock[] = [
+      {
+        kind: "text",
+        partID: "p1",
+        text: "## Result\n\n- **north**\n- `south`\n\n| branch | rows |\n| --- | ---: |\n| north | 4 |",
+      },
+    ];
+    const { container } = render(<InlineSteps blocks={blocks} />);
+
+    expect(screen.getByRole("heading", { name: "Result", level: 2 })).toBeTruthy();
+    expect(container.querySelector("strong")?.textContent).toBe("north");
+    expect(container.querySelector("code")?.textContent).toBe("south");
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByRole("table")).toBeTruthy();
   });
 
   it("collapses reasoning behind a Thinking toggle", () => {

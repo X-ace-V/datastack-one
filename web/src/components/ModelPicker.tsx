@@ -35,9 +35,11 @@ export interface ModelPickerProps {
   onChange: (ref: string) => void;
   /** Disables the control, e.g. while a turn is in flight. */
   disabled?: boolean;
+  /** Header-sized treatment; omits explanatory copy while keeping tier and model controls. */
+  compact?: boolean;
 }
 
-export function ModelPicker({ value, onChange, disabled = false }: ModelPickerProps) {
+export function ModelPicker({ value, onChange, disabled = false, compact = false }: ModelPickerProps) {
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,23 +62,23 @@ export function ModelPicker({ value, onChange, disabled = false }: ModelPickerPr
   // Generation still works — omitting the override leaves the backend on its default.
   if (error) {
     return (
-      <div>
+      <div className={compact ? "text-right" : undefined}>
         <p className="text-sm font-medium text-slate-700">Model</p>
         <p role="alert" className="mt-1 text-sm text-red-600">
           {error}
         </p>
-        <p className="mt-1 text-xs text-slate-500">
+        {!compact && <p className="mt-1 text-xs text-slate-500">
           Generation will use the platform's default free model.
-        </p>
+        </p>}
       </div>
     );
   }
 
   if (!catalog) {
     return (
-      <div>
-        <p className="text-sm font-medium text-slate-700">Model</p>
-        <p className="mt-1 text-xs text-slate-500">Loading models…</p>
+      <div className={compact ? "flex items-center gap-2 text-xs text-slate-500" : undefined}>
+        <p className={compact ? "font-medium" : "text-sm font-medium text-slate-700"}>Model</p>
+        <p className={compact ? undefined : "mt-1 text-xs text-slate-500"}>Loading models…</p>
       </div>
     );
   }
@@ -97,6 +99,57 @@ export function ModelPicker({ value, onChange, disabled = false }: ModelPickerPr
     // from the other tier instead would silently contradict the click.
     if (ref) onChange(ref);
   };
+
+  if (compact) {
+    return (
+      <div className="flex items-center gap-2">
+        <div
+          role="group"
+          aria-label="Quality tier"
+          className="hidden items-center rounded-lg bg-slate-100 p-0.5 sm:flex"
+        >
+          {MODEL_TIERS.map((tier) => {
+            const available = modelsInTier(catalog.providers, tier).length > 0;
+            const active = tier === activeTier;
+            return (
+              <button
+                key={tier}
+                type="button"
+                aria-pressed={active}
+                disabled={disabled || !available}
+                onClick={() => handleTier(tier)}
+                className={`rounded-md px-2.5 py-1.5 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-35 ${
+                  active
+                    ? "bg-white text-slate-900 shadow-sm"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                {MODEL_TIER_LABELS[tier]}
+              </button>
+            );
+          })}
+        </div>
+        <label htmlFor="model-picker" className="sr-only">Model</label>
+        <select
+          id="model-picker"
+          value={effectiveRef}
+          onChange={(event) => onChange(event.target.value)}
+          disabled={disabled}
+          title={current ? `${current.ref} — ${formatModelCost(current)}` : effectiveRef}
+          className="max-w-52 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-violet-400 focus:ring-2 focus:ring-violet-100 disabled:bg-slate-50 disabled:opacity-60"
+        >
+          {!current && <option value={effectiveRef}>{effectiveRef} (unavailable)</option>}
+          {providersInTier(catalog.providers, activeTier).map((provider) => (
+            <optgroup key={provider.id} label={provider.name}>
+              {provider.models.map((model) => (
+                <option key={model.ref} value={model.ref}>{model.name}</option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </div>
+    );
+  }
 
   return (
     <div>

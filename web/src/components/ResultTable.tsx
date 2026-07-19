@@ -24,7 +24,7 @@ export function ResultTable({ result }: { result: QueryResult }) {
 
   return (
     <section aria-label="Query result" className="space-y-2">
-      <div className="overflow-x-auto rounded-md border border-slate-200">
+      <div className="overflow-x-auto rounded-xl border border-slate-200 shadow-sm">
         <table className="min-w-full divide-y divide-slate-200 text-sm">
           <thead className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
             <tr>
@@ -45,7 +45,7 @@ export function ResultTable({ result }: { result: QueryResult }) {
           <tbody className="divide-y divide-slate-100">
             {result.rows.map((row, index) => (
               // A query result has no key column of its own, so row position is the identity.
-              <tr key={index}>
+              <tr key={index} className="transition-colors hover:bg-slate-50/80">
                 {result.columns.map((column) => (
                   <td
                     key={column.name}

@@ -15,7 +15,7 @@ export function EndpointsList({ endpoints }: { endpoints: PublishedEndpoint[] })
     <section aria-label="Published endpoints">
       <ul className="space-y-2">
         {endpoints.map((endpoint) => (
-          <li key={endpoint.name} className="rounded-md border border-slate-200 p-3">
+          <li key={endpoint.name} className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
             <div className="flex items-center justify-between gap-2">
               <span className="truncate font-mono text-sm font-medium text-slate-800">
                 {endpoint.name}
@@ -26,7 +26,7 @@ export function EndpointsList({ endpoints }: { endpoints: PublishedEndpoint[] })
             </div>
             <div className="mt-2 flex gap-3 text-xs">
               <a
-                className="text-indigo-600 hover:underline"
+                className="rounded-md bg-violet-50 px-2 py-1 font-semibold text-violet-700 transition hover:bg-violet-100"
                 href={endpoint.endpoint}
                 target="_blank"
                 rel="noreferrer"
@@ -34,7 +34,7 @@ export function EndpointsList({ endpoints }: { endpoints: PublishedEndpoint[] })
                 REST
               </a>
               <a
-                className="text-indigo-600 hover:underline"
+                className="rounded-md bg-slate-100 px-2 py-1 font-semibold text-slate-700 transition hover:bg-slate-200"
                 href={endpoint.csvEndpoint}
                 target="_blank"
                 rel="noreferrer"
