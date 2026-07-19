@@ -48,6 +48,19 @@ function stateWith(overrides: Partial<SessionLiveState> = {}): SessionLiveState 
   return { ...createEmptySessionState(), ...overrides };
 }
 
+function controls() {
+  return {
+    setDraft: vi.fn(),
+    uploadFiles: vi.fn(),
+    retryAttachment: vi.fn(),
+    removeAttachment: vi.fn(),
+    clearReadyAttachments: vi.fn(),
+    loadFolder: vi.fn(async () => {}),
+    openFolderSession: vi.fn(async () => {}),
+    refreshFolder: vi.fn(async () => {}),
+  };
+}
+
 describe("ChatPane", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -61,11 +74,9 @@ describe("ChatPane", () => {
     const appendUserMessage = vi.fn(() => "u1");
     const { calls } = installFetch(() => jsonResponse(202, { id: "u1" }));
     render(
-      <ChatPane sessionId="ses_1" state={stateWith()} appendUserMessage={appendUserMessage} />,
+      <ChatPane {...controls()} sessionId="ses_1" state={stateWith({ draft: "profile the loans" })} appendUserMessage={appendUserMessage} />,
     );
 
-    const box = screen.getByLabelText("Message the agent");
-    fireEvent.change(box, { target: { value: "profile the loans" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
     });
@@ -81,6 +92,7 @@ describe("ChatPane", () => {
     const { calls } = installFetch(() => jsonResponse(200, { status: "cancelled" }));
     render(
       <ChatPane
+        {...controls()}
         sessionId="ses_1"
         state={stateWith({ isWorking: true })}
         appendUserMessage={vi.fn(() => "u1")}
@@ -100,12 +112,9 @@ describe("ChatPane", () => {
     const appendUserMessage = vi.fn(() => "u1");
     installFetch(() => jsonResponse(502, { error: "runtime unavailable" }));
     render(
-      <ChatPane sessionId="ses_1" state={stateWith()} appendUserMessage={appendUserMessage} />,
+      <ChatPane {...controls()} sessionId="ses_1" state={stateWith({ draft: "build the report" })} appendUserMessage={appendUserMessage} />,
     );
 
-    fireEvent.change(screen.getByLabelText("Message the agent"), {
-      target: { value: "build the report" },
-    });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
     });
@@ -119,6 +128,7 @@ describe("ChatPane", () => {
   it("prefers the streamed turn error over a stale send error", () => {
     render(
       <ChatPane
+        {...controls()}
         sessionId="ses_1"
         state={stateWith({ error: "model overloaded" })}
         appendUserMessage={vi.fn(() => "u1")}

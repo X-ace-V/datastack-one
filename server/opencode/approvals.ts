@@ -24,8 +24,8 @@ import {
  * via {@link PermissionAskedProperties}/{@link PermissionRepliedProperties}.
  *
  * Events are fed in via {@link ApprovalGate.ingest}, driven from the event bridge's single
- * `event.subscribe()` pump (see {@link file://./bridge.ts}) so the platform reads the
- * runtime's event stream exactly once.
+ * `/global/event` pump (see {@link file://./bridge.ts}) so the platform reads one stream across
+ * every folder-rooted runtime.
  */
 
 /**

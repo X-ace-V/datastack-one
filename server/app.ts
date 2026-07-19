@@ -10,6 +10,7 @@ import {
   CreateSessionRequestSchema,
   UpdateSessionRequestSchema,
   SessionModelError,
+  SessionAttachmentError,
 } from "./core/sessions.js";
 import { ProfileRequestSchema } from "./core/profile.js";
 import { RulesInputSchema } from "./core/artifacts.js";
@@ -28,7 +29,11 @@ import {
   listSources,
   updateSourceRowCount,
 } from "./store/sources.js";
-import { ServedQuerySchema, servedCsvFilename } from "./core/serving.js";
+import {
+  ServedQuerySchema,
+  servedCsvFilename,
+  sessionScopedServedName,
+} from "./core/serving.js";
 import { getServedTable, listServedTables } from "./store/serving.js";
 import {
   ServedExportMissingError,
@@ -36,7 +41,7 @@ import {
   readServedData,
 } from "./serving/reader.js";
 import { profileSource } from "./tools/profile.js";
-import { loadCsvRowCount } from "./tools/csv.js";
+import { loadDataRowCount } from "./tools/data-source.js";
 import { listSourcesForSession } from "./tools/list-sources.js";
 import { runQuery } from "./tools/query.js";
 import { DEFAULT_LANDING_DIR, landParquet } from "./tools/land.js";
@@ -44,7 +49,13 @@ import { loadWarehouse } from "./tools/warehouse.js";
 import { runTransform } from "./tools/transform.js";
 import { DEFAULT_SERVING_DIR, publishServing } from "./tools/serve.js";
 import { safeDatasetName } from "./core/landing.js";
-import { getSessionSource, registerSessionSource } from "./store/session-sources.js";
+import {
+  clearSessionSources,
+  clearSessionSourcesByOrigin,
+  getSessionSource,
+  listSessionSources,
+  registerSessionSource,
+} from "./store/session-sources.js";
 import {
   attachedTableName,
   POSTGRES_SOURCE_KIND,
@@ -88,6 +99,25 @@ import {
 import type { ToolApprovalGate } from "./opencode/tool-approvals.js";
 import type { EventHub } from "./opencode/hub.js";
 import { SessionManager, SessionRuntimeError } from "./opencode/sessions.js";
+import type { SessionWarehouseRegistry } from "./store/session-warehouses.js";
+import {
+  ConnectFolderRequestSchema,
+  isQueryableWorkspaceKind,
+  isSensitiveWorkspaceName,
+  ListWorkspaceFilesRequestSchema,
+  ReadWorkspaceFileRequestSchema,
+  WriteWorkspaceFileRequestSchema,
+  workspaceFileKind,
+  type WorkspaceFileKind,
+  type WorkspaceFile,
+} from "./core/workspace.js";
+import type { LocalWorkspaceService } from "./workspace/local.js";
+import {
+  connectSessionFolder,
+  disconnectSessionFolder,
+  getSessionFolder,
+} from "./store/session-folders.js";
+import { sourceNameFromRelativePath } from "./core/session-sources.js";
 
 /** Backend identity, surfaced by `/api/health` so a client can confirm the target. */
 export const SERVICE_NAME = "datastack-one";
@@ -125,6 +155,10 @@ export interface ServerDeps {
    * 503, since a health-only boot has no warehouse to persist to.
    */
   store?: WarehouseStore;
+  /** Isolated DuckDB execution stores. Omitted in narrow tests, which fall back to `store`. */
+  sessionWarehouses?: SessionWarehouseRegistry;
+  /** Secure local-folder browser/indexer. Only wired for the localhost application boot. */
+  workspace?: LocalWorkspaceService;
   /**
    * Probes whether a registered connection URL is reachable, backing
    * `POST /api/connections/:name/test` (FR5). Injected so route tests supply a deterministic,
@@ -188,9 +222,79 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   const landingDir = deps.landingDir ?? DEFAULT_LANDING_DIR;
   const servingDir = deps.servingDir ?? DEFAULT_SERVING_DIR;
 
+  /**
+   * Resolve the data-plane store for one chat. The global store remains the control plane; when
+   * an isolated registry is wired, mirror only this session's path-safe source registrations into
+   * its private warehouse before a tool runs.
+   */
+  async function executionStore(sessionId: string): Promise<WarehouseStore> {
+    if (!deps.store) throw new Error("session source store unavailable");
+    if (!deps.sessionWarehouses) return deps.store;
+    const isolated = await deps.sessionWarehouses.get(sessionId);
+    const sources = await listSessionSources(deps.store, sessionId);
+    await clearSessionSources(isolated, sessionId);
+    for (const source of sources) {
+      await registerSessionSource(isolated, {
+        sessionId,
+        name: source.name,
+        kind: source.kind,
+        path: source.path,
+        origin: source.origin,
+        relativePath: source.relativePath,
+        rowCount: source.rowCount,
+      });
+    }
+    return isolated;
+  }
+
+  async function indexConnectedFolder(
+    sessionId: string,
+    folderPath: string,
+  ): Promise<WorkspaceFile[]> {
+    if (!deps.store || !deps.workspace) throw new Error("folder workspace unavailable");
+    const files = await deps.workspace.scan(folderPath);
+    await clearSessionSourcesByOrigin(deps.store, sessionId, "folder");
+    for (const file of files) {
+      if (!file.queryable) continue;
+      await registerSessionSource(deps.store, {
+        sessionId,
+        name: file.sourceName ?? sourceNameFromRelativePath(file.path),
+        kind: file.kind,
+        path: join(folderPath, file.path),
+        origin: "folder",
+        relativePath: file.path,
+      });
+    }
+    return files;
+  }
+
   // FR2: accept CSV uploads as multipart/form-data. Registered for the whole app; only the
   // source-upload route reads a file, and the size cap guards the disk.
   app.register(multipart, { limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } });
+
+  // Local filesystem endpoints are more sensitive than ordinary API reads. Browsers may call
+  // them only from a loopback origin; same-origin server/plugin/test requests carry no Origin and
+  // remain valid. `Sec-Fetch-Site: cross-site` is rejected as an additional CSRF guard.
+  app.addHook("onRequest", async (req, reply) => {
+    const filesystemRoute =
+      req.url.startsWith("/api/folders") ||
+      /\/api\/sessions\/[^/]+\/folder(?:[/?]|$)/.test(req.url) ||
+      (req.method === "POST" && req.url.split("?", 1)[0] === "/api/sessions");
+    if (!filesystemRoute) return;
+    if (req.headers["sec-fetch-site"] === "cross-site") {
+      return reply.code(403).send({ error: "cross-site folder access is not allowed" });
+    }
+    const origin = req.headers.origin;
+    if (!origin) return;
+    try {
+      const hostname = new URL(origin).hostname;
+      if (!["localhost", "127.0.0.1", "::1", "[::1]"].includes(hostname)) {
+        return reply.code(403).send({ error: "folder access requires a localhost origin" });
+      }
+    } catch {
+      return reply.code(403).send({ error: "invalid request origin" });
+    }
+  });
 
   app.get("/api/health", async (): Promise<HealthStatus> => {
     // Build then validate against the shared contract so the route can never
@@ -213,8 +317,11 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     return await listModels(deps.opencode);
   });
 
-  // FR1: create a chat session. Opens an OpenCode session and persists it under its id via
-  // the SessionManager. Body (both fields optional) is validated against the shared contract
+  // FR1: create a chat session. When `folderPath` is supplied, resolve it through the secure
+  // local workspace service first, then create OpenCode IN that directory. OpenCode session
+  // directories are immutable, so this is the only honest way to get Claude Code/Codex-style
+  // folder semantics: choosing another folder creates another independent chat.
+  // The body is validated against the shared contract
   // (400); a runtime failure to open the OpenCode session is a 502 (nothing is persisted).
   // On success the persisted row — with its OpenCode id, title, and null-or-chosen model — is
   // returned with 201. Status map: 503 unwired, 400 bad body, 502 runtime, 201 created.
@@ -230,8 +337,39 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         .send({ error: "invalid session", details: parsed.error.issues });
     }
 
+    let resolvedFolder: { name: string; path: string } | null = null;
+    if (parsed.data.folderPath) {
+      if (!deps.store || !deps.workspace) {
+        return reply.code(503).send({ error: "folder workspace unavailable" });
+      }
+      try {
+        resolvedFolder = await deps.workspace.resolveFolder(parsed.data.folderPath);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(400).send({ error: message });
+      }
+    }
+
     try {
-      const session = await deps.sessions.create(parsed.data);
+      const session = await deps.sessions.create({
+        ...parsed.data,
+        ...(resolvedFolder ? { folderPath: resolvedFolder.path } : {}),
+      });
+      if (resolvedFolder && deps.store) {
+        try {
+          await indexConnectedFolder(session.id, resolvedFolder.path);
+          await connectSessionFolder(deps.store, {
+            sessionId: session.id,
+            ...resolvedFolder,
+            workspaceRoot: true,
+          });
+        } catch (err) {
+          // Do not leave a session that claims to be folder-rooted when its workspace could not
+          // be registered. The runtime and all platform rows are rolled back together.
+          await deps.sessions.delete(session.id).catch(() => {});
+          throw err;
+        }
+      }
       return reply.code(201).send(session);
     } catch (err) {
       if (err instanceof SessionRuntimeError) {
@@ -248,6 +386,23 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       return reply.code(503).send({ error: "session manager unavailable" });
     }
     return reply.code(200).send({ sessions: await deps.sessions.list() });
+  });
+
+  // Recover OpenCode's live busy/idle/retry state after a browser reload. Runtime events keep
+  // the map current afterward; this snapshot prevents background work from looking idle merely
+  // because the page connected after the busy event was emitted.
+  app.get("/api/sessions/status", async (_req, reply) => {
+    if (!deps.sessions) {
+      return reply.code(503).send({ error: "session manager unavailable" });
+    }
+    try {
+      return reply.code(200).send({ statuses: await deps.sessions.status() });
+    } catch (err) {
+      if (err instanceof SessionRuntimeError) {
+        return reply.code(502).send({ error: err.message });
+      }
+      throw err;
+    }
   });
 
   // FR1: fetch a single session together with its ordered message history — the shape a
@@ -352,6 +507,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         if (!existed) {
           return reply.code(404).send({ error: "session not found" });
         }
+        await deps.sessionWarehouses?.delete(req.params.id);
         return reply.code(204).send();
       } catch (err) {
         if (err instanceof SessionRuntimeError) {
@@ -389,13 +545,92 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         }
         return reply.code(202).send(message);
       } catch (err) {
-        if (err instanceof SessionModelError) {
+        if (err instanceof SessionModelError || err instanceof SessionAttachmentError) {
           return reply.code(400).send({ error: err.message });
         }
         throw err;
       }
     },
   );
+
+  // Secure server-backed folder picker for the localhost web UI. Browsing is constrained by
+  // LocalWorkspaceService's configured roots; only directory names/paths are returned here.
+  app.get<{ Querystring: { path?: string } }>("/api/folders", async (req, reply) => {
+    if (!deps.workspace) {
+      return reply.code(503).send({ error: "folder workspace unavailable" });
+    }
+    try {
+      return reply.code(200).send(await deps.workspace.browse(req.query?.path));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(400).send({ error: message });
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/folder", async (req, reply) => {
+    if (!deps.store || !deps.workspace) {
+      return reply.code(503).send({ error: "folder workspace unavailable" });
+    }
+    const session = await getSession(deps.store, req.params.id);
+    if (!session) return reply.code(404).send({ error: "session not found" });
+    const folder = await getSessionFolder(deps.store, req.params.id);
+    if (!folder) return reply.code(200).send({ folder: null, files: [] });
+    try {
+      return reply.code(200).send({ folder, files: await deps.workspace.scan(folder.path) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(410).send({ error: message, folder, files: [] });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/sessions/:id/folder", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "folder workspace unavailable" });
+    }
+    const parsed = ConnectFolderRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid folder", details: parsed.error.issues });
+    }
+    const session = await getSession(deps.store, req.params.id);
+    if (!session) return reply.code(404).send({ error: "session not found" });
+    return reply.code(409).send({
+      error:
+        "an OpenCode session cannot change working directory; start a new session with folderPath",
+    });
+  });
+
+  app.post<{ Params: { id: string } }>(
+    "/api/sessions/:id/folder/refresh",
+    async (req, reply) => {
+      if (!deps.store || !deps.workspace) {
+        return reply.code(503).send({ error: "folder workspace unavailable" });
+      }
+      const folder = await getSessionFolder(deps.store, req.params.id);
+      if (!folder) return reply.code(404).send({ error: "folder not connected" });
+      try {
+        const files = await indexConnectedFolder(req.params.id, folder.path);
+        return reply.code(200).send({ folder, files });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.code(400).send({ error: message });
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>("/api/sessions/:id/folder", async (req, reply) => {
+    if (!deps.store) return reply.code(503).send({ error: "folder workspace unavailable" });
+    const session = await getSession(deps.store, req.params.id);
+    if (!session) return reply.code(404).send({ error: "session not found" });
+    const folder = await getSessionFolder(deps.store, req.params.id);
+    if (folder?.workspaceRoot) {
+      return reply.code(409).send({
+        error: "a session workspace is immutable; switch to or create another session",
+      });
+    }
+    await clearSessionSourcesByOrigin(deps.store, req.params.id, "folder");
+    await disconnectSessionFolder(deps.store, req.params.id);
+    return reply.code(204).send();
+  });
 
   // FR2: cancel the in-flight turn on a session via `session.abort`. The manager checks the
   // store before touching the runtime, so an unknown id is a clean 404; a runtime failure to
@@ -422,7 +657,19 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     },
   );
 
-  // FR4 (V3.2): upload a CSV into a chat session. The raw file lands under
+  /** List path-free source registrations for composer chips and connected-folder feedback. */
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/sources", async (req, reply) => {
+    if (!deps.store) {
+      return reply.code(503).send({ error: "session source store unavailable" });
+    }
+    const session = await getSession(deps.store, req.params.id);
+    if (!session) return reply.code(404).send({ error: "session not found" });
+    const sources = await listSessionSources(deps.store, req.params.id);
+    return reply.code(200).send({ sources: sources.map(toSessionSourceView) });
+  });
+
+  // Upload a data/project file into a chat session. Multiple composer selections use one request
+  // per file, so each upload is independently retryable and remains session-owned.
   // `data/uploads/<sessionId>/` and is registered in `platform.session_sources` under a name
   // derived from the filename, so the agent's `list_sources`/`profile_source` tools see it — the
   // agent addresses it by that name; the on-disk path is resolved backend-side and never handed
@@ -447,11 +694,17 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       }
 
       const data = await req.file();
-      if (!data) {
-        return reply.code(400).send({ error: "a CSV file is required" });
+      if (!data) return reply.code(400).send({ error: "a file is required" });
+      const kind = workspaceFileKind(data.filename);
+      if (!kind) {
+        return reply.code(400).send({
+          error: "supported files: CSV, TSV, JSON/JSONL, Parquet, SQL, YAML, Markdown, and text",
+        });
       }
-      if (!isCsvFilename(data.filename)) {
-        return reply.code(400).send({ error: "only .csv files are supported" });
+      if (isSensitiveWorkspaceName(data.filename)) {
+        return reply.code(400).send({
+          error: "credential and environment files cannot be attached to a chat",
+        });
       }
 
       let content: Buffer;
@@ -478,18 +731,26 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
 
       // Confirm the file is genuinely loadable in DuckDB and capture its row count, so
       // `list_sources` shows a count at once and an unreadable file fails here, not later.
-      let rowCount: number;
-      try {
-        rowCount = await loadCsvRowCount(deps.store, path);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return reply.code(422).send({ error: `could not load CSV: ${message}` });
+      let rowCount: number | null = null;
+      if (isQueryableWorkspaceKind(kind as WorkspaceFileKind)) {
+        try {
+          rowCount = await loadDataRowCount(
+            await executionStore(session.id),
+            path,
+            kind,
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return reply.code(422).send({ error: `could not load ${kind}: ${message}` });
+        }
       }
 
       const source = await registerSessionSource(deps.store, {
         sessionId: session.id,
         name: sourceNameFromFilename(data.filename),
         path,
+        kind,
+        origin: "upload",
         rowCount,
       });
       return reply.code(201).send({ source: toSessionSourceView(source) });
@@ -1048,6 +1309,58 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     return reply.code(200).send({ sources });
   });
 
+  // Folder-aware read tools expose relative names/content only. Absolute paths remain backend
+  // control data and never cross the loopback into the model.
+  app.post("/api/internal/tools/list_workspace_files", async (req, reply) => {
+    if (!deps.store || !deps.workspace) {
+      return reply.code(503).send({ error: "folder workspace unavailable" });
+    }
+    const parsed = ListWorkspaceFilesRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid list_workspace_files request" });
+    }
+    const folder = await getSessionFolder(deps.store, parsed.data.sessionID);
+    if (!folder) return reply.code(200).send({ folder: null, files: [] });
+    try {
+      return reply.code(200).send({
+        folder: { name: folder.name },
+        files: await deps.workspace.scan(folder.path),
+      });
+    } catch (err) {
+      return reply.code(422).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/api/internal/tools/read_workspace_file", async (req, reply) => {
+    if (!deps.store || !deps.workspace) {
+      return reply.code(503).send({ error: "folder workspace unavailable" });
+    }
+    const parsed = ReadWorkspaceFileRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid read_workspace_file request" });
+    }
+    try {
+      // An uploaded text file is addressed by its safe source name. A connected-folder file is
+      // addressed by its relative path. Both resolutions stay backend-side.
+      const source = await getSessionSource(
+        deps.store,
+        parsed.data.sessionID,
+        parsed.data.path,
+      );
+      if (source?.origin === "upload") {
+        const content = await deps.workspace.readRegisteredFile(source.path, source.kind);
+        return reply.code(200).send({ path: source.name, content });
+      }
+      const folder = await getSessionFolder(deps.store, parsed.data.sessionID);
+      if (!folder) return reply.code(404).send({ error: "folder not connected" });
+      return reply.code(200).send(
+        await deps.workspace.read(folder.path, parsed.data.path),
+      );
+    } catch (err) {
+      return reply.code(422).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // `profile_source`: profile a named source connected to a session (schema, types, row count,
   // null %, candidate keys, date cols). Resolves the name → path backend-side, then runs the
   // read-only profiler. Status map: 503 unwired store, 400 bad body, 404 no source of that name
@@ -1074,7 +1387,11 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
 
     let profile;
     try {
-      profile = await profileSource(deps.store, source.path);
+      profile = await profileSource(
+        await executionStore(parsed.data.sessionID),
+        source.path,
+        source.kind,
+      );
     } catch (err) {
       // read_csv_auto failed (missing file, unreadable CSV) — report it rather than 500.
       const message = err instanceof Error ? err.message : String(err);
@@ -1100,7 +1417,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
 
     let result;
     try {
-      result = await runQuery(deps.store, {
+      result = await runQuery(await executionStore(parsed.data.sessionID), {
         sessionId: parsed.data.sessionID,
         sql: parsed.data.sql,
       });
@@ -1147,7 +1464,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
 
     let result;
     try {
-      result = await runDqCheck(deps.store, { spec: spec.data });
+      result = await runDqCheck(await executionStore(parsed.data.sessionID), { spec: spec.data });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return reply.code(422).send({ error: `could not run data-quality checks: ${message}` });
@@ -1215,6 +1532,51 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     });
   }
 
+  // Approval-gated create/replace for text-based SQL/dbt project files in the connected folder.
+  // No delete operation is exposed. The model uses a relative path and the backend resolves it.
+  app.post("/api/internal/tools/write_workspace_file", async (req, reply) => {
+    if (!deps.store || !deps.workspace) {
+      return reply.code(503).send({ error: "folder workspace unavailable" });
+    }
+    if (!deps.toolApprovals) {
+      return reply.code(503).send({ error: "approval gate unavailable" });
+    }
+    const parsed = WriteWorkspaceFileRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "invalid write_workspace_file request" });
+    }
+    const folder = await getSessionFolder(deps.store, parsed.data.sessionID);
+    if (!folder) return reply.code(404).send({ error: "folder not connected" });
+    const approved = await awaitWriteApproval(parsed.data.sessionID, "write_workspace_file", {
+      tool: "write_workspace_file",
+      path: parsed.data.path,
+      content: parsed.data.content,
+      summary: `Create or replace workspace file "${parsed.data.path}".`,
+    });
+    if (!approved) {
+      await recordToolCallLineage(parsed.data.sessionID, "write_workspace_file", "rejected", {
+        path: parsed.data.path,
+      });
+      return reply.code(200).send({ approved: false });
+    }
+    try {
+      await deps.workspace.write(folder.path, parsed.data.path, parsed.data.content);
+      await indexConnectedFolder(parsed.data.sessionID, folder.path);
+      await recordToolCallLineage(parsed.data.sessionID, "write_workspace_file", "completed", {
+        path: parsed.data.path,
+        bytes: Buffer.byteLength(parsed.data.content),
+      });
+      return reply.code(200).send({ path: parsed.data.path, bytes: Buffer.byteLength(parsed.data.content) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await recordToolCallLineage(parsed.data.sessionID, "write_workspace_file", "error", {
+        path: parsed.data.path,
+        error: message,
+      });
+      return reply.code(422).send({ error: `could not write workspace file: ${message}` });
+    }
+  });
+
   // `land_parquet`: land a session's connected source to Parquet under `<landingDir>/<sessionID>/`.
   app.post("/api/internal/tools/land_parquet", async (req, reply) => {
     if (!deps.store) {
@@ -1249,9 +1611,10 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     }
 
     try {
-      const result = await landParquet(deps.store, {
+      const result = await landParquet(await executionStore(parsed.data.sessionID), {
         landingDir: join(landingDir, parsed.data.sessionID),
         sourcePath: source.path,
+        sourceKind: source.kind,
         dataset: source.name,
         ingestionDate: parsed.data.ingestionDate,
       });
@@ -1317,7 +1680,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       safeDatasetName(parsed.data.dataset),
     );
     try {
-      const result = await loadWarehouse(deps.store, {
+      const result = await loadWarehouse(await executionStore(parsed.data.sessionID), {
         landingPath,
         schema: parsed.data.schema as "raw" | "staging" | undefined,
         table: parsed.data.table,
@@ -1375,7 +1738,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     }
 
     try {
-      const result = await runTransform(deps.store, {
+      const result = await runTransform(await executionStore(parsed.data.sessionID), {
         sql: parsed.data.sql,
         targetTable: parsed.data.targetTable,
       });
@@ -1430,7 +1793,13 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       });
     }
 
-    const servedName = parsed.data.name ?? parsed.data.table;
+    const requestedName = parsed.data.name ?? parsed.data.table;
+    // The legacy project workflow keeps its public name. Chat-owned publishes use a session
+    // prefix because the shared endpoint registry is keyed by URL name; this prevents two live
+    // sessions that both publish `report` from replacing one another.
+    const servedName = deps.sessionWarehouses
+      ? sessionScopedServedName(parsed.data.sessionID, requestedName)
+      : requestedName;
     const approved = await awaitWriteApproval(parsed.data.sessionID, "publish_serving", {
       tool: "publish_serving",
       table: parsed.data.table,
@@ -1448,12 +1817,12 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     }
 
     try {
-      const result = await publishServing(deps.store, {
+      const result = await publishServing(await executionStore(parsed.data.sessionID), {
         servingDir,
         projectId: parsed.data.sessionID,
         table: parsed.data.table,
-        name: parsed.data.name,
-      });
+        name: servedName,
+      }, deps.store);
       await recordToolCallLineage(parsed.data.sessionID, "publish_serving", "completed", {
         table: parsed.data.table,
         name: result.name,
@@ -1524,7 +1893,8 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     }
 
     try {
-      const result = await deps.attachSource(deps.store, {
+      const isolated = await executionStore(parsed.data.sessionID);
+      const result = await deps.attachSource(isolated, {
         alias: parsed.data.name,
         url: stored.url,
       });
@@ -1540,7 +1910,17 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
           name,
           kind: POSTGRES_SOURCE_KIND,
           path: name,
+          origin: "connection",
         });
+        if (isolated !== deps.store) {
+          await registerSessionSource(isolated, {
+            sessionId: parsed.data.sessionID,
+            name,
+            kind: POSTGRES_SOURCE_KIND,
+            path: name,
+            origin: "connection",
+          });
+        }
       }
       await recordToolCallLineage(parsed.data.sessionID, "attach_source", "completed", {
         connection: parsed.data.name,

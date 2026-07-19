@@ -4,6 +4,7 @@ import {
   type RawColumnStat,
   type SourceProfile,
 } from "../core/profile.js";
+import { dataSourceRelation } from "./data-source.js";
 
 /**
  * The `profile_source` tool (PRD FR2, ARCHITECTURE §5). Read-only: it profiles a CSV via
@@ -38,9 +39,11 @@ function quoteIdent(name: string): string {
 export async function profileSource(
   store: WarehouseStore,
   path: string,
+  kind: string = "csv",
 ): Promise<SourceProfile> {
+  const relation = dataSourceRelation(kind, "?");
   const described = await store.all(
-    "DESCRIBE SELECT * FROM read_csv_auto(?)",
+    `DESCRIBE SELECT * FROM ${relation}`,
     [path],
   );
   const columns: DescribedColumn[] = described.map((row) => ({
@@ -61,7 +64,7 @@ export async function profileSource(
   });
 
   const aggregated = await store.all(
-    `SELECT ${selectParts.join(", ")} FROM read_csv_auto(?)`,
+    `SELECT ${selectParts.join(", ")} FROM ${relation}`,
     [path],
   );
   const row = aggregated[0];

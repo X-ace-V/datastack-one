@@ -77,6 +77,9 @@ describe("data-tools plugin", () => {
     "run_transform",
     "publish_serving",
     "attach_source",
+    "list_workspace_files",
+    "read_workspace_file",
+    "write_workspace_file",
   ] as const;
 
   type Tools = Record<(typeof TOOL_NAMES)[number], ToolDefinition>;
@@ -188,27 +191,36 @@ describe("data-tools plugin", () => {
     };
   }
 
-  it("registers the read tools and the five write tools with descriptions and args", async () => {
+  it("registers the session data and workspace tools with descriptions and args", async () => {
     expect(await registeredToolNames()).toEqual([
       "attach_source",
       "land_parquet",
       "list_sources",
+      "list_workspace_files",
       "load_warehouse",
       "profile_source",
       "publish_serving",
+      "read_workspace_file",
       "run_dq_check",
       "run_query",
       "run_transform",
+      "write_workspace_file",
     ]);
     const tools = await instantiate();
     expect(tools.list_sources.description).toMatch(/list the data sources/i);
     expect(tools.profile_source.description).toMatch(/profile/i);
     expect(tools.run_query.description).toMatch(/read-only sql select/i);
     expect(tools.run_dq_check.description).toMatch(/data-quality checks/i);
+    expect(tools.list_workspace_files.description).toMatch(/folder connected to this chat/i);
+    expect(tools.read_workspace_file.description).toMatch(/read/i);
+    expect(tools.write_workspace_file.description).toMatch(/approval/i);
     // profile_source takes a `source` name; list_sources takes no args; run_query takes `sql`.
     expect(Object.keys(tools.profile_source.args)).toEqual(["source"]);
     expect(Object.keys(tools.list_sources.args)).toEqual([]);
     expect(Object.keys(tools.run_query.args)).toEqual(["sql"]);
+    expect(Object.keys(tools.list_workspace_files.args)).toEqual([]);
+    expect(Object.keys(tools.read_workspace_file.args)).toEqual(["path"]);
+    expect(Object.keys(tools.write_workspace_file.args).sort()).toEqual(["content", "path"]);
     // run_dq_check takes an optional target table and the reviewable checks.
     expect(Object.keys(tools.run_dq_check.args).sort()).toEqual(["checks", "targetTable"]);
     // The four write tools carry their approval-gated args.
@@ -231,7 +243,14 @@ describe("data-tools plugin", () => {
       );
     }
     // The read tools are NOT gated, so they must not claim to pause.
-    for (const name of ["list_sources", "profile_source", "run_query", "run_dq_check"] as const) {
+    for (const name of [
+      "list_sources",
+      "profile_source",
+      "run_query",
+      "run_dq_check",
+      "list_workspace_files",
+      "read_workspace_file",
+    ] as const) {
       expect((ASK_TOOLS as readonly string[]).includes(name)).toBe(false);
     }
   });
@@ -266,7 +285,8 @@ describe("data-tools plugin", () => {
       const { list_sources } = await instantiate();
       const result = await list_sources.execute({}, ctx("ses_empty"));
       expect(result).toBe(
-        "No data sources are connected to this session yet. Upload a CSV to add one.",
+        "No data sources are connected to this session yet. " +
+          "Upload files or connect a local folder from the chat composer.",
       );
     } finally {
       await close();

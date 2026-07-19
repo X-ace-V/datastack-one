@@ -7,8 +7,9 @@ import {
 } from "@duckdb/node-api";
 
 /**
- * DuckDB metadata store. This module owns the single warehouse file and the
- * `platform` metadata schema every other backend module reads and writes. It is
+ * DuckDB store primitive. The default file is the control-plane metadata store; the same
+ * opener also creates each session's isolated execution catalog (with identical base schemas).
+ * The `platform` metadata schema is available in both so existing tool/store contracts compose. It is
  * an I/O module by design (fs + DuckDB), so it lives under `server/store`, not
  * `server/core` (which stays pure). See ARCHITECTURE §3.4 and §9.
  */
@@ -39,6 +40,7 @@ export const PLATFORM_TABLES = [
   "messages",
   "lineage",
   "session_sources",
+  "session_folders",
   "connections",
   "projects",
   "sources",
@@ -54,11 +56,11 @@ export const PLATFORM_TABLES = [
 export type PlatformTable = (typeof PLATFORM_TABLES)[number];
 
 /**
- * Idempotent DDL for the metadata store. Every statement is `IF NOT EXISTS` so
- * migrating an already-migrated database is a no-op — the migration can run on
- * every boot. Timestamps default to `now()` at insert time; ids are supplied by
- * the caller (application-generated) so this schema has no engine-specific
- * sequence coupling.
+ * Idempotent DDL for the metadata store. Table/schema creation is guarded by
+ * `IF NOT EXISTS`; columns added after the original schema are handled by the
+ * explicit, catalog-checked migrations below. Timestamps default to `now()` at
+ * insert time; ids are supplied by the caller (application-generated) so this
+ * schema has no engine-specific sequence coupling.
  */
 const MIGRATION_STATEMENTS: readonly string[] = [
   ...WAREHOUSE_SCHEMAS.map((s) => `CREATE SCHEMA IF NOT EXISTS ${s};`),
@@ -90,13 +92,9 @@ const MIGRATION_STATEMENTS: readonly string[] = [
      role       VARCHAR NOT NULL,
      content    VARCHAR NOT NULL,
      blocks     VARCHAR,
+     attachments VARCHAR,
      created_at TIMESTAMP NOT NULL DEFAULT now()
    );`,
-  // Backfill the V6.2 `blocks` column onto a warehouse migrated before it existed. `CREATE TABLE
-  // IF NOT EXISTS` above never alters an existing table, so an on-disk DB from an earlier build
-  // needs this idempotent ALTER; `ADD COLUMN IF NOT EXISTS` is a no-op once the column is there.
-  `ALTER TABLE platform.messages ADD COLUMN IF NOT EXISTS blocks VARCHAR;`,
-
   // FR9/FR10/FR12 — the conversational agent's per-session lineage/audit log. One append-only
   // row per auditable event the agent produced — a tool call, an approval decision, or a DQ
   // result — discriminated by `kind` ('tool_call' | 'approval' | 'dq_result'). `run_id` groups
@@ -128,11 +126,21 @@ const MIGRATION_STATEMENTS: readonly string[] = [
      name       VARCHAR NOT NULL,
      kind       VARCHAR NOT NULL DEFAULT 'csv',
      path       VARCHAR NOT NULL,
+     origin     VARCHAR NOT NULL DEFAULT 'upload',
+     relative_path VARCHAR,
      row_count  BIGINT,
      created_at TIMESTAMP NOT NULL DEFAULT now(),
      PRIMARY KEY (session_id, name)
    );`,
-
+  // One primary local workspace folder per chat session. The absolute path is control-plane
+  // metadata used only by the local backend; model-facing tools receive relative paths.
+  `CREATE TABLE IF NOT EXISTS platform.session_folders (
+     session_id   VARCHAR PRIMARY KEY,
+     name         VARCHAR NOT NULL,
+     path         VARCHAR NOT NULL,
+     workspace_root BOOLEAN NOT NULL DEFAULT false,
+     connected_at TIMESTAMP NOT NULL DEFAULT now()
+   );`,
   // FR5 — registered database connections (Settings → Connections). One row per named Postgres
   // (Neon) connection the user added. Keyed by `name` (a registry, not a log): the name is the
   // agent-facing handle and the future `ATTACH … AS <name>` alias, so exactly one URL answers a
@@ -257,6 +265,50 @@ const MIGRATION_STATEMENTS: readonly string[] = [
    );`,
 ];
 
+/**
+ * Columns introduced after the first on-disk schema shipped. DuckDB 1.5.x can
+ * write a redundant `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ... DEFAULT ...`
+ * into the WAL and then fail internally while replaying it after an unclean
+ * shutdown. Querying the catalog first means an already-migrated database does
+ * not execute (or log) an ALTER on every boot. Defaults are backfilled with a
+ * separate UPDATE; all application writes supply `origin`/`workspace_root`
+ * explicitly, while fresh databases retain their NOT NULL defaults above.
+ */
+const COLUMN_MIGRATIONS = [
+  {
+    schema: "platform",
+    table: "messages",
+    column: "blocks",
+    definition: "VARCHAR",
+  },
+  {
+    schema: "platform",
+    table: "messages",
+    column: "attachments",
+    definition: "VARCHAR",
+  },
+  {
+    schema: "platform",
+    table: "session_sources",
+    column: "origin",
+    definition: "VARCHAR",
+    backfill: "'upload'",
+  },
+  {
+    schema: "platform",
+    table: "session_sources",
+    column: "relative_path",
+    definition: "VARCHAR",
+  },
+  {
+    schema: "platform",
+    table: "session_folders",
+    column: "workspace_root",
+    definition: "BOOLEAN",
+    backfill: "false",
+  },
+] as const;
+
 /** A thin, awaitable handle over one DuckDB connection to the warehouse file. */
 export interface WarehouseStore {
   /** The underlying connection, for tools/routes that need raw access. */
@@ -282,6 +334,28 @@ export interface WarehouseStore {
 export async function migrate(store: WarehouseStore): Promise<void> {
   for (const statement of MIGRATION_STATEMENTS) {
     await store.run(statement);
+  }
+
+  for (const migration of COLUMN_MIGRATIONS) {
+    const rows = await store.all(
+      `SELECT 1 AS present
+       FROM information_schema.columns
+       WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
+      [migration.schema, migration.table, migration.column],
+    );
+    if (rows.length === 0) {
+      await store.run(
+        `ALTER TABLE ${migration.schema}.${migration.table}
+         ADD COLUMN ${migration.column} ${migration.definition}`,
+      );
+    }
+    if ("backfill" in migration) {
+      await store.run(
+        `UPDATE ${migration.schema}.${migration.table}
+         SET ${migration.column} = ${migration.backfill}
+         WHERE ${migration.column} IS NULL`,
+      );
+    }
   }
 }
 
@@ -320,5 +394,11 @@ export async function openStore(
   };
 
   await migrate(store);
+  // Consolidate schema changes immediately. If the process is interrupted later,
+  // its WAL contains only application transactions, not catalog ALTER records that
+  // DuckDB 1.5.x may be unable to replay after a crash.
+  if (path !== ":memory:") {
+    await store.run("CHECKPOINT;");
+  }
   return store;
 }

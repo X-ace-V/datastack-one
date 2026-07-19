@@ -18,20 +18,26 @@ import { PersistedBlockSchema } from "./transcript.js";
 export const MESSAGE_ROLES = ["user", "assistant"] as const;
 export type MessageRole = (typeof MESSAGE_ROLES)[number];
 
-/** Fallback title when a session is created without one, so `title` is never empty. */
+/** Defensive fallback only when an older OpenCode runtime returns no title. */
 export const DEFAULT_SESSION_TITLE = "New session";
 
 /**
- * Request body for creating a session. Both fields are optional: an untitled create falls
- * back to {@link DEFAULT_SESSION_TITLE}, and an unset `model` means the platform default
- * applies at prompt time (never duplicate the default into a stored row). Strings are
- * trimmed so " " never passes as a non-empty title/model.
+ * Request body for creating a session. Both fields are optional. When `title` is omitted the
+ * platform deliberately omits it from `session.create`, allowing OpenCode to own the initial
+ * placeholder and generate the real title after the first user prompt. An unset `model` means
+ * the platform default applies at prompt time (never duplicate the default into a stored row).
  */
 export const CreateSessionRequestSchema = z.object({
-  /** Human label for the session; defaults to {@link DEFAULT_SESSION_TITLE} when omitted. */
+  /** Human label for the session; omitted lets OpenCode generate it from the first prompt. */
   title: z.string().trim().min(1).optional(),
   /** Per-session model ref (e.g. `opencode/big-pickle`); `null`/omitted → platform default. */
   model: z.string().trim().min(1).optional(),
+  /**
+   * Canonical local working directory for this OpenCode session. The localhost route resolves
+   * and authorizes it before the manager receives it; it is control-plane input only and is
+   * never included in a prompt or session response.
+   */
+  folderPath: z.string().trim().min(1).optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequestSchema>;
 
@@ -68,14 +74,28 @@ export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequestSchema>;
  * language prompt (trimmed, non-empty — an empty turn is meaningless). `model` optionally
  * overrides the model for this single turn; omitted, the session's stored model applies, and
  * absent that, the platform default. The turn is fired at the agent and the answer streams
- * back over SSE, so this body carries only what the user typed.
+ * back over SSE. Attachments are safe references to files already registered to this session;
+ * neither an absolute path nor file bytes enter this request.
  */
-export const ChatRequestSchema = z.object({
-  /** The user's natural-language prompt for this turn. */
-  text: z.string().trim().min(1),
-  /** Per-turn model ref (e.g. `opencode/big-pickle`); omitted → the session/platform default. */
-  model: z.string().trim().min(1).optional(),
+export const AttachmentRefSchema = z.object({
+  /** Session-owned safe source name, never an absolute path. */
+  name: z.string().trim().min(1),
+  kind: z.string().trim().min(1),
 });
+export type AttachmentRef = z.infer<typeof AttachmentRefSchema>;
+
+export const ChatRequestSchema = z
+  .object({
+    /** The user's natural-language prompt. May be empty for a file-only turn. */
+    text: z.string().trim().optional(),
+    /** Already-uploaded session sources attached to this specific turn. */
+    attachments: z.array(AttachmentRefSchema).max(20).optional(),
+    /** Per-turn model ref (e.g. `opencode/big-pickle`); omitted → session/platform default. */
+    model: z.string().trim().min(1).optional(),
+  })
+  .refine((body) => (body.text?.length ?? 0) > 0 || (body.attachments?.length ?? 0) > 0, {
+    message: "a message or at least one attachment is required",
+  });
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 
 /**
@@ -88,6 +108,14 @@ export class SessionModelError extends Error {
   constructor(ref: string) {
     super(`invalid model ref "${ref}" (expected provider/model)`);
     this.name = "SessionModelError";
+  }
+}
+
+/** Raised when a chat tries to reference a file owned by another or unknown session. */
+export class SessionAttachmentError extends Error {
+  constructor(name: string) {
+    super(`attachment "${name}" is not connected to this session`);
+    this.name = "SessionAttachmentError";
   }
 }
 
@@ -118,6 +146,19 @@ export const SessionSchema = z.object({
 });
 export type Session = z.infer<typeof SessionSchema>;
 
+/** OpenCode's live per-session execution states, mirrored by `/api/sessions/status`. */
+export const SESSION_AGENT_STATUSES = ["idle", "busy", "retry"] as const;
+export type SessionAgentStatus = (typeof SESSION_AGENT_STATUSES)[number];
+
+/** One entry in the runtime status map. Retry carries the provider's retry detail. */
+export const SessionAgentStatusSchema = z.object({
+  type: z.enum(SESSION_AGENT_STATUSES),
+  attempt: z.number().int().nonnegative().optional(),
+  message: z.string().optional(),
+  next: z.number().optional(),
+});
+export type SessionAgentStatusInfo = z.infer<typeof SessionAgentStatusSchema>;
+
 /**
  * One persisted transcript message. `seq` orders messages monotonically within a session
  * (wall-clock `createdAt` can tie at sub-ms resolution), so a reopened session replays in
@@ -137,6 +178,8 @@ export const MessageSchema = z.object({
    * on an assistant row persisted before V6.2. See {@link file://./transcript.ts}.
    */
   blocks: z.array(PersistedBlockSchema).optional(),
+  /** File/source chips sent with a user turn. */
+  attachments: z.array(AttachmentRefSchema).optional(),
 });
 export type Message = z.infer<typeof MessageSchema>;
 

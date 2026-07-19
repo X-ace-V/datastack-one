@@ -1,9 +1,9 @@
 # DataStack One — Demo walkthrough
 
-This is the end-to-end demo: open a chat session, upload a CSV, ask questions in plain English,
-and have the agent build and publish a served report — pausing inline for your approval on every
-write. Part 2 adds a **live Postgres** (Neon) so the agent can join your upload to real database
-tables.
+This is the end-to-end demo: open independent chat sessions, attach files or connect an existing
+local folder from the composer, ask questions in plain English, and have the agent build and
+publish a served report — pausing inline for your approval on every write. Part 2 adds a **live
+Postgres** (Neon) so the agent can join your session files to real database tables.
 
 Everything here uses **synthetic data only** (`fixtures/loans_sample.csv`, `fixtures/rules.txt`,
 `fixtures/pg_seed.sql`). Never point the app at production data, and never through a free model —
@@ -24,8 +24,8 @@ npm run dev          # backend on :3001, web app on :5173
 ```
 
 Open **<http://localhost:5173>**. The screen is three panes: the **session sidebar** (left), the
-**chat stream** (center), and the **data panel** (right). The agent's reasoning, tool calls,
-inline approvals, and query results all stream into these live over SSE.
+**chat stream/composer** (center), and the output-only **data panel** (right). The agent's
+reasoning, tool calls, inline approvals, and query results all stream into these live over SSE.
 
 ---
 
@@ -33,13 +33,23 @@ inline approvals, and query results all stream into these live over SSE.
 
 This is the PRD §5 acceptance path, driven entirely by conversation.
 
-### 1. Create a session and upload the CSV
+### 1. Create a session and attach the CSV
 
-- In the sidebar, click **New session**. Each session is its own OpenCode session with its own
-  history; you can run several and switch between them.
-- Upload [`fixtures/loans_sample.csv`](./fixtures/loans_sample.csv) into the session (the CSV
-  control in the data panel). It is registered as a source and loaded into DuckDB — the agent now
+- In the sidebar, click **New session**. OpenCode generates a useful title from the first prompt.
+  Each chat has its own history, draft, files/folder, DuckDB execution catalog, and live status;
+  you can start work in several and switch without stopping the inactive turns.
+- Click the **+** inside the composer, choose **Upload files**, and select
+  [`fixtures/loans_sample.csv`](./fixtures/loans_sample.csv). The chooser accepts several files at
+  once; each appears as an independently retryable attachment chip. The CSV is registered as a
+  session source and validated in DuckDB — the agent now
   sees it by name via `list_sources`, with no path or credential ever reaching the model.
+
+Alternatively, choose **Start session from folder** from the same **+** menu and select an existing
+local data project. The app creates and activates a new independent chat whose OpenCode working
+directory is exactly that folder; asking `pwd` returns the selected path, not the DataStack source
+repository. Supported data and SQL/YAML/Markdown/text files are indexed for this chat. The prior
+chat remains in the sidebar and keeps running. Hidden/generated/credential files and symlinks are
+excluded. Folder writes are create/replace only and pause for inline approval.
 
 ### 2. Ask a question in plain English
 
@@ -74,12 +84,9 @@ Once `publish_serving` is approved, the endpoint shows in the data panel. It rea
 snapshot that passed DQ and that you approved — not the live `marts` table — so a later failed run
 can't leak un-published rows:
 
-```bash
-curl localhost:3001/api/serve/daily_branch_summary        # JSON preview
-curl localhost:3001/api/serve/daily_branch_summary.csv    # CSV download
-```
-
-(Use whatever name the agent published; the served name is the endpoint URL.)
+Use the exact REST/CSV links shown in the panel. Chat publications are prefixed with their session
+id (for example `/api/serve/ses_…-daily_branch_summary`) so two background sessions can both
+publish a report named `daily_branch_summary` without replacing each other.
 
 ### 5. Reopen the session
 

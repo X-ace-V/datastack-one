@@ -4,12 +4,15 @@ import {
   ChatRequestSchema,
   CreateSessionRequestSchema,
   DEFAULT_SESSION_TITLE,
+  SessionAgentStatusSchema,
+  SessionAttachmentError,
   parseModelRef,
   type ChatRequest,
   type CreateSessionRequest,
   type Message,
   type MessageRole,
   type Session,
+  type SessionAgentStatusInfo,
   type SessionWithHistory,
 } from "../core/sessions.js";
 import {
@@ -22,6 +25,8 @@ import {
   renameSession,
   updateSessionModel,
 } from "../store/sessions.js";
+import { getSessionSource } from "../store/session-sources.js";
+import { getSessionFolder, listSessionFolders } from "../store/session-folders.js";
 
 /**
  * SessionManager (PRD FR1, TASKS V1.1) — the one place the platform maps a chat session to
@@ -63,28 +68,87 @@ export class SessionManager {
   ) {}
 
   /**
+   * OpenCode's v1 APIs are directory-scoped. A session keeps the cwd it was created with, but
+   * every later request still needs to address that directory's runtime instance. Legacy folder
+   * attachments are deliberately ignored: only a folder recorded as the immutable workspace
+   * root may steer an OpenCode call.
+   */
+  private async runtimeQuery(id: string): Promise<{ query: { directory: string } } | object> {
+    const folder = await getSessionFolder(this.store, id);
+    return folder?.workspaceRoot ? { query: { directory: folder.path } } : {};
+  }
+
+  /**
    * Create a chat session: open an OpenCode session, then persist it under its OpenCode id.
-   * A title defaults to {@link DEFAULT_SESSION_TITLE} (the row's `title` is NOT NULL) and is
-   * sent to OpenCode too so both agree; `model` is platform metadata (OpenCode picks the
-   * model per prompt), stored as the per-session default for later turns.
+   * An omitted title is also omitted from OpenCode's request. That is load-bearing: OpenCode
+   * only runs its native first-prompt title generator while the session still has its own
+   * default title. `model` is platform metadata, stored as the per-session default for turns.
    *
    * If the runtime fails, nothing is persisted — the store never holds a session with no
    * live OpenCode counterpart.
    */
   async create(input: CreateSessionRequest = {}): Promise<Session> {
     const parsed = CreateSessionRequestSchema.parse(input);
-    const title = parsed.title ?? DEFAULT_SESSION_TITLE;
-
-    const res = await this.client.session.create({ body: { title } });
+    const res = await this.client.session.create({
+      body: parsed.title === undefined ? {} : { title: parsed.title },
+      ...(parsed.folderPath ? { query: { directory: parsed.folderPath } } : {}),
+    });
     if (res.error || !res.data) {
       throw new SessionRuntimeError("create", res.error ?? "no session returned");
     }
 
     return insertSession(this.store, {
       id: res.data.id,
-      title,
+      // OpenCode is canonical for session titles. Its create response carries either the
+      // explicit title or its native default placeholder; the fallback only protects an older
+      // or malformed runtime response from violating the store's NOT NULL contract.
+      title:
+        typeof res.data.title === "string" && res.data.title.trim().length > 0
+          ? res.data.title
+          : parsed.title ?? DEFAULT_SESSION_TITLE,
       model: parsed.model ?? null,
     });
+  }
+
+  /**
+   * Mirror a title emitted by OpenCode's native title generator into the durable session index.
+   * This never calls `session.update` back into the runtime (which would loop the event); it only
+   * updates the platform cache used by the sidebar and restart recovery.
+   */
+  async syncRuntimeTitle(id: string, title: string): Promise<Session | null> {
+    const clean = title.trim();
+    if (!clean) return getSession(this.store, id);
+    const existing = await getSession(this.store, id);
+    if (!existing || existing.title === clean) return existing;
+    return renameSession(this.store, id, clean);
+  }
+
+  /** Return OpenCode's live status map so a browser reload can recover background activity. */
+  async status(): Promise<Record<string, SessionAgentStatusInfo>> {
+    const statuses: Record<string, SessionAgentStatusInfo> = {};
+    const folders = await listSessionFolders(this.store);
+    const directories = [
+      undefined,
+      ...new Set(
+        folders.filter((folder) => folder.workspaceRoot).map((folder) => folder.path),
+      ),
+    ];
+    const responses = await Promise.all(
+      directories.map((directory) =>
+        this.client.session.status(
+          directory ? { query: { directory } } : {},
+        ),
+      ),
+    );
+    for (const res of responses) {
+      if (res.error || !res.data) {
+        throw new SessionRuntimeError("status", res.error ?? "no status map returned");
+      }
+      for (const [id, status] of Object.entries(res.data)) {
+        statuses[id] = SessionAgentStatusSchema.parse(status);
+      }
+    }
+    return statuses;
   }
 
   /**
@@ -119,6 +183,7 @@ export class SessionManager {
     const res = await this.client.session.update({
       path: { id },
       body: { title },
+      ...(await this.runtimeQuery(id)),
     });
     if (res.error) {
       throw new SessionRuntimeError("update", res.error);
@@ -160,7 +225,10 @@ export class SessionManager {
       return false;
     }
 
-    const res = await this.client.session.delete({ path: { id } });
+    const res = await this.client.session.delete({
+      path: { id },
+      ...(await this.runtimeQuery(id)),
+    });
     if (res.error) {
       throw new SessionRuntimeError("delete", res.error);
     }
@@ -208,11 +276,33 @@ export class SessionManager {
     const ref = parsed.model ?? existing.model ?? undefined;
     const model = ref ? parseModelRef(ref) : undefined;
 
+    // Validate every safe source name against THIS session before persisting or prompting. A
+    // guessed name from another chat cannot cross the boundary even if it exists globally.
+    const attachments = parsed.attachments ?? [];
+    const text = parsed.text ?? "";
+    for (const attachment of attachments) {
+      const source = await getSessionSource(this.store, sessionId, attachment.name);
+      if (!source || source.kind !== attachment.kind) {
+        throw new SessionAttachmentError(attachment.name);
+      }
+    }
+
     const message = await appendMessage(this.store, {
       sessionId,
       role: "user",
-      content: parsed.text,
+      content: text,
+      attachments,
     });
+
+    const attachmentContext = attachments.length
+      ? [
+          "",
+          "Files attached to this turn (session-owned source names):",
+          ...attachments.map((file) => `- ${file.name} (${file.kind})`),
+          "Use list_sources/profile_source/run_query or read_workspace_file as appropriate.",
+        ].join("\n")
+      : "";
+    const promptText = `${text || "Inspect the attached files and explain what you find."}${attachmentContext}`;
 
     // Fire-and-forget: the turn runs in the background and its output streams over SSE. We do
     // not await it (that is what keeps the route fast) and swallow a transport rejection here —
@@ -222,8 +312,9 @@ export class SessionManager {
     void this.client.session
       .prompt({
         path: { id: sessionId },
+        ...(await this.runtimeQuery(sessionId)),
         body: {
-          parts: [{ type: "text", text: parsed.text }],
+          parts: [{ type: "text", text: promptText }],
           ...(model ? { model } : {}),
         },
       })
@@ -244,7 +335,10 @@ export class SessionManager {
       return false;
     }
 
-    const res = await this.client.session.abort({ path: { id: sessionId } });
+    const res = await this.client.session.abort({
+      path: { id: sessionId },
+      ...(await this.runtimeQuery(sessionId)),
+    });
     if (res.error) {
       throw new SessionRuntimeError("abort", res.error);
     }

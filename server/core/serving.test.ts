@@ -3,6 +3,7 @@ import {
   buildCsvExportSql,
   isServingFormat,
   safeServedName,
+  sessionScopedServedName,
   servedCsvEndpoint,
   servedCsvFilename,
   servedEndpoint,
@@ -65,6 +66,11 @@ describe("safeServedName", () => {
 });
 
 describe("served endpoints", () => {
+  it("scopes chat-owned endpoints so equal report names cannot collide across sessions", () => {
+    expect(sessionScopedServedName("ses_alpha", "report")).toBe("ses_alpha-report");
+    expect(sessionScopedServedName("ses_beta", "report")).toBe("ses_beta-report");
+  });
+
   it("derives the REST and CSV endpoints from the served name", () => {
     expect(servedEndpoint("totals")).toBe("/api/serve/totals");
     expect(servedCsvEndpoint("totals")).toBe("/api/serve/totals.csv");

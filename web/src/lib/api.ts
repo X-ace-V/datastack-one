@@ -58,7 +58,7 @@ export interface CreateProjectInput {
   servingStyle?: string;
 }
 
-/** An uploaded CSV source, mirroring the backend `SourceSchema`. */
+/** A legacy project upload, mirroring the backend `SourceSchema`. */
 export interface Source {
   id: string;
   projectId: string;
@@ -175,6 +175,12 @@ export interface Message {
   createdAt: string;
   /** An assistant turn's ordered rendered blocks (V6.2); absent on a user message. */
   blocks?: PersistedBlock[];
+  attachments?: AttachmentRef[];
+}
+
+export interface AttachmentRef {
+  name: string;
+  kind: string;
 }
 
 /** A session together with its ordered history, mirroring `SessionWithHistorySchema` (FR1). */
@@ -186,6 +192,8 @@ export interface SessionWithHistory extends Session {
 export interface CreateSessionInput {
   title?: string;
   model?: string;
+  /** Start OpenCode with this authorized local folder as the session's immutable cwd. */
+  folderPath?: string;
 }
 
 /** List all chat sessions, most recently active first, for the sidebar (V2.3). */
@@ -196,6 +204,22 @@ export async function listSessions(): Promise<Session[]> {
   }
   const body = (await res.json()) as { sessions: Session[] };
   return body.sessions;
+}
+
+/** OpenCode's live execution state for one chat session. */
+export type SessionRuntimeStatus =
+  | { type: "idle" }
+  | { type: "busy" }
+  | { type: "retry"; attempt?: number; message?: string; next?: number };
+
+/** Recover all currently active OpenCode session states after a page reload/reconnect. */
+export async function listSessionStatuses(): Promise<Record<string, SessionRuntimeStatus>> {
+  const res = await fetch("/api/sessions/status");
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to load session statuses"));
+  }
+  const body = (await res.json()) as { statuses: Record<string, SessionRuntimeStatus> };
+  return body.statuses ?? {};
 }
 
 /** Create a chat session and return the persisted row (201). */
@@ -218,6 +242,101 @@ export async function getSession(id: string): Promise<SessionWithHistory> {
     throw new Error(await errorMessage(res, "Failed to load session"));
   }
   return (await res.json()) as SessionWithHistory;
+}
+
+/**
+ * A session's registered source, path-free (mirrors the backend `SessionSourceView`). The on-disk
+ * path is never sent to the browser or the model (FR5b).
+ */
+export interface SessionSourceView {
+  sessionId: string;
+  name: string;
+  kind: string;
+  origin: "upload" | "folder" | "connection";
+  relativePath: string | null;
+  rowCount: number | null;
+  createdAt: string;
+}
+
+/**
+ * Upload a supported data/project file into a session (FR4). Posts multipart/form-data; the backend registers it under a
+ * name derived from the filename so the agent's `list_sources`/`profile_source` tools see it.
+ * Returns the registered source (path withheld).
+ */
+export async function uploadSessionSource(
+  sessionId: string,
+  file: File,
+): Promise<SessionSourceView> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const res = await fetch(`/api/sessions/${sessionId}/sources`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to upload file"));
+  }
+  const body = (await res.json()) as { source: SessionSourceView };
+  return body.source;
+}
+
+export async function listSessionSources(sessionId: string): Promise<SessionSourceView[]> {
+  const res = await fetch(`/api/sessions/${sessionId}/sources`);
+  if (!res.ok) throw new Error(await errorMessage(res, "Failed to list session files"));
+  return ((await res.json()) as { sources: SessionSourceView[] }).sources;
+}
+
+export interface SessionFolder {
+  sessionId: string;
+  name: string;
+  path: string;
+  workspaceRoot: boolean;
+  connectedAt: string;
+}
+
+export interface WorkspaceFile {
+  path: string;
+  name: string;
+  kind: string;
+  size: number;
+  modifiedAt: string;
+  queryable: boolean;
+  sourceName?: string;
+}
+
+export interface FolderEntry {
+  name: string;
+  path: string;
+}
+
+export interface FolderBrowseResult {
+  path: string | null;
+  parent: string | null;
+  folders: FolderEntry[];
+}
+
+export interface SessionFolderResult {
+  folder: SessionFolder | null;
+  files: WorkspaceFile[];
+}
+
+export async function browseFolders(path?: string): Promise<FolderBrowseResult> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  const res = await fetch(`/api/folders${query}`);
+  if (!res.ok) throw new Error(await errorMessage(res, "Failed to browse folders"));
+  return (await res.json()) as FolderBrowseResult;
+}
+
+export async function getSessionFolder(sessionId: string): Promise<SessionFolderResult> {
+  const res = await fetch(`/api/sessions/${sessionId}/folder`);
+  if (!res.ok) throw new Error(await errorMessage(res, "Failed to load connected folder"));
+  return (await res.json()) as SessionFolderResult;
+}
+
+export async function refreshSessionFolder(sessionId: string): Promise<SessionFolderResult> {
+  const res = await fetch(`/api/sessions/${sessionId}/folder/refresh`, { method: "POST" });
+  if (!res.ok) throw new Error(await errorMessage(res, "Failed to refresh folder"));
+  return (await res.json()) as SessionFolderResult;
 }
 
 /**
@@ -308,11 +427,16 @@ export async function sendChat(
   sessionId: string,
   text: string,
   model?: string,
+  attachments: AttachmentRef[] = [],
 ): Promise<Message> {
   const res = await fetch(`/api/sessions/${sessionId}/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(model ? { text, model } : { text }),
+    body: JSON.stringify({
+      text,
+      ...(model ? { model } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
+    }),
   });
   if (!res.ok) {
     throw new Error(await errorMessage(res, "Failed to send message"));

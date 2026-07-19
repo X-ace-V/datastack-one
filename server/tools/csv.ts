@@ -1,4 +1,5 @@
 import type { WarehouseStore } from "../store/duckdb.js";
+import { loadDataRowCount } from "./data-source.js";
 
 /**
  * Confirm an uploaded CSV is loadable in DuckDB and return its row count (PRD FR4, V3.2). The
@@ -14,13 +15,5 @@ export async function loadCsvRowCount(
   store: WarehouseStore,
   path: string,
 ): Promise<number> {
-  const rows = await store.all(
-    "SELECT count(*)::BIGINT AS row_count FROM read_csv_auto(?)",
-    [path],
-  );
-  const row = rows[0];
-  if (!row) {
-    throw new Error(`loadCsvRowCount: no row returned for ${path}`);
-  }
-  return Number(row.row_count);
+  return loadDataRowCount(store, path, "csv");
 }

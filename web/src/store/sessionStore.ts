@@ -9,6 +9,22 @@
 // wrapper around it so the fold logic can be verified without React.
 
 import { useCallback, useRef, useState } from "react";
+import {
+  createSession as createSessionApi,
+  deleteSession as deleteSessionApi,
+  listSessions as listSessionsApi,
+  listSessionStatuses,
+  renameSession as renameSessionApi,
+  uploadSessionSource,
+  getSessionFolder as getSessionFolderApi,
+  refreshSessionFolder as refreshSessionFolderApi,
+  type AttachmentRef,
+  type Session,
+  type SessionFolder,
+  type SessionRuntimeStatus,
+  type SessionSourceView,
+  type WorkspaceFile,
+} from "../lib/api";
 
 // --- Web mirror of the backend normalized-event contract (server/core/events.ts) ---
 // Web mirrors the wire shapes as plain types rather than importing server code (NodeNext,
@@ -80,6 +96,17 @@ export interface ApprovalResolvedEvent {
   requestID: string;
   status: "approved" | "rejected";
 }
+export interface SessionUpdatedEvent {
+  kind: "session_updated";
+  sessionID: string;
+  title: string;
+}
+export interface SessionStatusEvent {
+  kind: "session_status";
+  sessionID: string;
+  status: "idle" | "busy" | "retry";
+  message?: string;
+}
 
 /** The discriminated union delivered over `GET /api/events` (FR3). */
 export type NormalizedEvent =
@@ -89,7 +116,9 @@ export type NormalizedEvent =
   | IdleEvent
   | ErrorEvent
   | ApprovalEvent
-  | ApprovalResolvedEvent;
+  | ApprovalResolvedEvent
+  | SessionUpdatedEvent
+  | SessionStatusEvent;
 
 // --- Rendered transcript model ---
 
@@ -132,6 +161,7 @@ export interface UserMessage {
   role: "user";
   id: string;
   content: string;
+  attachments?: AttachmentRef[];
 }
 
 /** An assistant turn — one OpenCode message (`id` is its `messageID`) of ordered blocks. */
@@ -156,6 +186,12 @@ export interface SessionLiveState {
   pendingApprovals: ApprovalRequest[];
   isWorking: boolean;
   error: string | null;
+  /** Composer state is per session, so switching never moves a draft or file queue across chats. */
+  draft: string;
+  attachments: ComposerAttachment[];
+  folder: SessionFolder | null;
+  workspaceFiles: WorkspaceFile[];
+  folderError: string | null;
   /**
    * User prompts sent this session whose runtime echo has not yet been bound to a messageID.
    * The runtime re-streams the user's prompt as a `text` event carrying no role, so the store
@@ -173,6 +209,11 @@ export function createEmptySessionState(): SessionLiveState {
     pendingApprovals: [],
     isWorking: false,
     error: null,
+    draft: "",
+    attachments: [],
+    folder: null,
+    workspaceFiles: [],
+    folderError: null,
     pendingEchoes: [],
     echoMessageIds: [],
   };
@@ -191,6 +232,18 @@ export interface PersistedMessage {
   id: string;
   content: string;
   blocks?: Array<Exclude<InlineBlock, { kind: "approval" }>>;
+  attachments?: AttachmentRef[];
+}
+
+export type ComposerAttachmentStatus = "uploading" | "ready" | "error";
+export interface ComposerAttachment {
+  id: string;
+  file: File;
+  name: string;
+  size: number;
+  status: ComposerAttachmentStatus;
+  source?: SessionSourceView;
+  error?: string;
 }
 
 /**
@@ -199,8 +252,14 @@ export interface PersistedMessage {
  */
 export type StoreAction =
   | { type: "event"; event: NormalizedEvent }
-  | { type: "user-message"; id: string; text: string }
+  | { type: "user-message"; id: string; text: string; attachments?: AttachmentRef[] }
   | { type: "hydrate"; messages: PersistedMessage[] }
+  | { type: "set-draft"; text: string }
+  | { type: "add-attachments"; attachments: ComposerAttachment[] }
+  | { type: "update-attachment"; id: string; patch: Partial<ComposerAttachment> }
+  | { type: "remove-attachment"; id: string }
+  | { type: "clear-ready-attachments" }
+  | { type: "folder"; folder: SessionFolder | null; files: WorkspaceFile[]; error?: string | null }
   | { type: "reset" };
 
 /**
@@ -300,6 +359,33 @@ function resolveApproval(
 export function reduce(state: SessionLiveState, action: StoreAction): SessionLiveState {
   if (action.type === "reset") return createEmptySessionState();
 
+  if (action.type === "set-draft") return { ...state, draft: action.text };
+  if (action.type === "add-attachments") {
+    return { ...state, attachments: [...state.attachments, ...action.attachments] };
+  }
+  if (action.type === "update-attachment") {
+    return {
+      ...state,
+      attachments: state.attachments.map((attachment) =>
+        attachment.id === action.id ? { ...attachment, ...action.patch } : attachment,
+      ),
+    };
+  }
+  if (action.type === "remove-attachment") {
+    return { ...state, attachments: state.attachments.filter((item) => item.id !== action.id) };
+  }
+  if (action.type === "clear-ready-attachments") {
+    return { ...state, attachments: state.attachments.filter((item) => item.status !== "ready") };
+  }
+  if (action.type === "folder") {
+    return {
+      ...state,
+      folder: action.folder,
+      workspaceFiles: action.files,
+      folderError: action.error ?? null,
+    };
+  }
+
   if (action.type === "hydrate") {
     // Reopen: rebuild the transcript from persisted history (V6.2). A user turn becomes a plain
     // bubble; an assistant turn is reconstructed from its stored blocks (its tool-block history),
@@ -312,11 +398,19 @@ export function reduce(state: SessionLiveState, action: StoreAction): SessionLiv
             : [{ kind: "text", partID: `${m.id}:text`, text: m.content }];
         return { role: "assistant", id: m.id, blocks };
       }
-      return { role: "user", id: m.id, content: m.content };
+      return { role: "user", id: m.id, content: m.content, attachments: m.attachments };
     });
     // A hydrate replaces the transcript with the persisted one and clears live/echo bookkeeping;
     // the caller only hydrates a session that has no live state, so nothing streamed is lost.
-    return { ...createEmptySessionState(), messages };
+    return {
+      ...state,
+      messages,
+      pendingApprovals: [],
+      isWorking: false,
+      error: null,
+      pendingEchoes: [],
+      echoMessageIds: [],
+    };
   }
 
   if (action.type === "user-message") {
@@ -324,7 +418,17 @@ export function reduce(state: SessionLiveState, action: StoreAction): SessionLiv
       ...state,
       isWorking: true,
       error: null,
-      messages: [...state.messages, { role: "user", id: action.id, content: action.text }],
+      messages: [
+        ...state.messages,
+        {
+          role: "user",
+          id: action.id,
+          content: action.text,
+          ...(action.attachments && action.attachments.length > 0
+            ? { attachments: action.attachments }
+            : {}),
+        },
+      ],
       pendingEchoes: [...state.pendingEchoes, action.text],
     };
   }
@@ -427,6 +531,17 @@ export function reduce(state: SessionLiveState, action: StoreAction): SessionLiv
     case "error": {
       return { ...state, isWorking: false, error: event.message };
     }
+    // Session metadata/status is consumed by the central session index below. Status still
+    // updates `isWorking` here so selecting an inactive busy session renders the right composer.
+    case "session_status": {
+      return {
+        ...state,
+        isWorking: event.status === "busy" || event.status === "retry",
+        error: event.status === "retry" ? event.message ?? state.error : state.error,
+      };
+    }
+    case "session_updated":
+      return state;
     default: {
       // Exhaustiveness: every NormalizedEvent kind is handled above.
       const _never: never = event;
@@ -449,6 +564,16 @@ export interface Store {
   activeState: SessionLiveState;
   /** The active session id, or null when none is selected. */
   activeSessionId: string | null;
+  /** Central session index rendered by the sidebar; updated by REST mutations and SSE events. */
+  sessions: SessionSummary[];
+  sessionsLoading: boolean;
+  sessionsError: string | null;
+  /** Load the durable session list and OpenCode's current background status snapshot. */
+  loadSessions: () => Promise<void>;
+  /** Create, rename, and delete through the central index so every pane sees one source of truth. */
+  createSession: () => Promise<Session>;
+  renameSession: (sessionId: string, title: string) => Promise<Session>;
+  deleteSession: (sessionId: string) => Promise<void>;
   /** Select the active session; its stored state is mirrored to `activeState` immediately. */
   setActiveSession: (sessionId: string | null) => void;
   /** Read a session's live state from the Map without making it active (null if unseen). */
@@ -456,7 +581,16 @@ export interface Store {
   /** Route a normalized SSE event to its session (by `event.sessionID`) and fold it in. */
   handleEvent: (event: NormalizedEvent) => void;
   /** Append the user's turn to a session and arm echo suppression; returns the message id. */
-  appendUserMessage: (sessionId: string, text: string) => string;
+  appendUserMessage: (sessionId: string, text: string, attachments?: AttachmentRef[]) => string;
+  setDraft: (sessionId: string, text: string) => void;
+  uploadFiles: (sessionId: string, files: File[]) => void;
+  retryAttachment: (sessionId: string, attachmentId: string) => void;
+  removeAttachment: (sessionId: string, attachmentId: string) => void;
+  clearReadyAttachments: (sessionId: string) => void;
+  loadFolder: (sessionId: string) => Promise<void>;
+  /** Create and activate a new OpenCode chat whose immutable working directory is `path`. */
+  openFolderSession: (path: string) => Promise<Session>;
+  refreshFolder: (sessionId: string) => Promise<void>;
   /**
    * Seed a session's transcript from persisted history on reopen (V6.2). A no-op if the session
    * already has live state (streamed messages or a turn in flight), so a late-arriving fetch can
@@ -469,11 +603,30 @@ export interface Store {
   reset: (sessionId: string) => void;
 }
 
+/** User-facing session lifecycle shown for active and inactive rows. */
+export type SessionUiStatus = "idle" | "working" | "retry" | "waiting_approval" | "error";
+
+/** Durable session metadata plus transient OpenCode/background state. */
+export interface SessionSummary extends Session {
+  status: SessionUiStatus;
+  statusMessage?: string;
+}
+
+function uiStatus(status: SessionRuntimeStatus | undefined): SessionUiStatus {
+  if (status?.type === "busy") return "working";
+  if (status?.type === "retry") return "retry";
+  return "idle";
+}
+
 /** Generate a client-side id for a user turn (browser crypto; falls back for old runtimes). */
 function newMessageId(): string {
   const c = globalThis.crypto;
   if (c && typeof c.randomUUID === "function") return c.randomUUID();
   return `msg-${Math.random().toString(36).slice(2)}`;
+}
+
+function newAttachmentId(): string {
+  return `attachment-${newMessageId()}`;
 }
 
 /**
@@ -487,6 +640,12 @@ export function useSessionStore(): Store {
   const activeIdRef = useRef<string | null>(null);
   const [activeState, setActiveState] = useState<SessionLiveState>(createEmptySessionState);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const sessionMetaRef = useRef<
+    Map<string, { title?: string; status?: SessionUiStatus; statusMessage?: string }>
+  >(new Map());
 
   const ensure = useCallback((sessionId: string): SessionLiveState => {
     let s = mapRef.current.get(sessionId);
@@ -514,13 +673,235 @@ export function useSessionStore(): Store {
   const getState = useCallback((sessionId: string) => mapRef.current.get(sessionId), []);
 
   const handleEvent = useCallback((event: NormalizedEvent) => {
-    dispatch(event.sessionID, { type: "event", event });
+    const next = dispatch(event.sessionID, { type: "event", event });
+    const cached = sessionMetaRef.current.get(event.sessionID) ?? {};
+    if (event.kind === "session_updated") {
+      sessionMetaRef.current.set(event.sessionID, { ...cached, title: event.title });
+    } else if (event.kind === "session_status") {
+      sessionMetaRef.current.set(event.sessionID, {
+        ...cached,
+        status:
+          event.status === "busy" ? "working" : event.status === "retry" ? "retry" : "idle",
+        statusMessage: event.message,
+      });
+    } else if (event.kind === "approval") {
+      sessionMetaRef.current.set(event.sessionID, { ...cached, status: "waiting_approval" });
+    } else if (event.kind === "idle") {
+      sessionMetaRef.current.set(event.sessionID, { ...cached, status: "idle" });
+    } else if (event.kind === "error") {
+      sessionMetaRef.current.set(event.sessionID, {
+        ...cached,
+        status: "error",
+        statusMessage: event.message,
+      });
+    } else if (event.kind === "approval_resolved") {
+      sessionMetaRef.current.set(event.sessionID, {
+        ...cached,
+        status:
+          next.pendingApprovals.length > 0
+            ? "waiting_approval"
+            : next.isWorking
+              ? "working"
+              : "idle",
+      });
+    } else {
+      sessionMetaRef.current.set(event.sessionID, { ...cached, status: "working" });
+    }
+    setSessions((current) =>
+      current.map((session) => {
+        if (session.id !== event.sessionID) return session;
+        if (event.kind === "session_updated") {
+          return { ...session, title: event.title };
+        }
+        if (event.kind === "session_status") {
+          return {
+            ...session,
+            status:
+              event.status === "busy"
+                ? "working"
+                : event.status === "retry"
+                  ? "retry"
+                  : "idle",
+            statusMessage: event.message,
+          };
+        }
+        if (event.kind === "approval") {
+          return { ...session, status: "waiting_approval" };
+        }
+        if (event.kind === "approval_resolved") {
+          return {
+            ...session,
+            status:
+              next.pendingApprovals.length > 0
+                ? "waiting_approval"
+                : next.isWorking
+                  ? "working"
+                  : "idle",
+          };
+        }
+        if (event.kind === "idle") return { ...session, status: "idle" };
+        if (event.kind === "error") {
+          return { ...session, status: "error", statusMessage: event.message };
+        }
+        return { ...session, status: "working" };
+      }),
+    );
   }, [dispatch]);
 
-  const appendUserMessage = useCallback((sessionId: string, text: string) => {
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    setSessionsError(null);
+    try {
+      const [listed, statuses] = await Promise.all([
+        listSessionsApi(),
+        listSessionStatuses().catch(() => ({} as Record<string, SessionRuntimeStatus>)),
+      ]);
+      setSessions(
+        listed.map((session) => {
+          const cached = sessionMetaRef.current.get(session.id);
+          return {
+            ...session,
+            ...(cached?.title ? { title: cached.title } : {}),
+            status: cached?.status ?? uiStatus(statuses[session.id]),
+            ...(cached?.statusMessage ? { statusMessage: cached.statusMessage } : {}),
+          };
+        }),
+      );
+    } catch (error) {
+      setSessionsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, []);
+
+  const createSession = useCallback(async () => {
+    const session = await createSessionApi();
+    setSessions((current) => [{ ...session, status: "idle" }, ...current]);
+    return session;
+  }, []);
+
+  const renameSession = useCallback(async (sessionId: string, title: string) => {
+    const updated = await renameSessionApi(sessionId, title);
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === sessionId ? { ...session, ...updated } : session,
+      ),
+    );
+    return updated;
+  }, []);
+
+  const deleteSession = useCallback(async (sessionId: string) => {
+    await deleteSessionApi(sessionId);
+    setSessions((current) => current.filter((session) => session.id !== sessionId));
+    mapRef.current.delete(sessionId);
+    if (sessionId === activeIdRef.current) {
+      activeIdRef.current = null;
+      setActiveSessionId(null);
+      setActiveState(createEmptySessionState());
+    }
+  }, []);
+
+  const appendUserMessage = useCallback((
+    sessionId: string,
+    text: string,
+    attachments: AttachmentRef[] = [],
+  ) => {
     const id = newMessageId();
-    dispatch(sessionId, { type: "user-message", id, text });
+    dispatch(sessionId, { type: "user-message", id, text, attachments });
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === sessionId ? { ...session, status: "working" } : session,
+      ),
+    );
     return id;
+  }, [dispatch]);
+
+  const setDraft = useCallback((sessionId: string, text: string) => {
+    dispatch(sessionId, { type: "set-draft", text });
+  }, [dispatch]);
+
+  const performUpload = useCallback((sessionId: string, attachment: ComposerAttachment) => {
+    dispatch(sessionId, {
+      type: "update-attachment",
+      id: attachment.id,
+      patch: { status: "uploading", error: undefined },
+    });
+    void uploadSessionSource(sessionId, attachment.file)
+      .then((source) => {
+        dispatch(sessionId, {
+          type: "update-attachment",
+          id: attachment.id,
+          patch: { status: "ready", source, error: undefined },
+        });
+      })
+      .catch((error: unknown) => {
+        dispatch(sessionId, {
+          type: "update-attachment",
+          id: attachment.id,
+          patch: {
+            status: "error",
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+      });
+  }, [dispatch]);
+
+  const uploadFiles = useCallback((sessionId: string, files: File[]) => {
+    const attachments = files.map<ComposerAttachment>((file) => ({
+      id: newAttachmentId(),
+      file,
+      name: file.name,
+      size: file.size,
+      status: "uploading",
+    }));
+    if (attachments.length === 0) return;
+    dispatch(sessionId, { type: "add-attachments", attachments });
+    for (const attachment of attachments) performUpload(sessionId, attachment);
+  }, [dispatch, performUpload]);
+
+  const retryAttachment = useCallback((sessionId: string, attachmentId: string) => {
+    const attachment = mapRef.current
+      .get(sessionId)
+      ?.attachments.find((item) => item.id === attachmentId);
+    if (attachment) performUpload(sessionId, attachment);
+  }, [performUpload]);
+
+  const removeAttachment = useCallback((sessionId: string, attachmentId: string) => {
+    dispatch(sessionId, { type: "remove-attachment", id: attachmentId });
+  }, [dispatch]);
+
+  const clearReadyAttachments = useCallback((sessionId: string) => {
+    dispatch(sessionId, { type: "clear-ready-attachments" });
+  }, [dispatch]);
+
+  const loadFolder = useCallback(async (sessionId: string) => {
+    try {
+      const result = await getSessionFolderApi(sessionId);
+      dispatch(sessionId, { type: "folder", folder: result.folder, files: result.files });
+    } catch (error) {
+      dispatch(sessionId, {
+        type: "folder",
+        folder: null,
+        files: [],
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [dispatch]);
+
+  const openFolderSession = useCallback(async (path: string) => {
+    // OpenCode fixes a session's cwd at creation time. Starting another folder therefore starts
+    // another independent chat (the previous chat keeps running and remains in the sidebar).
+    const session = await createSessionApi({ folderPath: path });
+    const result = await getSessionFolderApi(session.id);
+    dispatch(session.id, { type: "folder", folder: result.folder, files: result.files });
+    setSessions((current) => [{ ...session, status: "idle" }, ...current]);
+    setActiveSession(session.id);
+    return session;
+  }, [dispatch, setActiveSession]);
+
+  const refreshFolder = useCallback(async (sessionId: string) => {
+    const result = await refreshSessionFolderApi(sessionId);
+    dispatch(sessionId, { type: "folder", folder: result.folder, files: result.files });
   }, [dispatch]);
 
   const hydrateSession = useCallback(
@@ -550,10 +931,25 @@ export function useSessionStore(): Store {
   return {
     activeState,
     activeSessionId,
+    sessions,
+    sessionsLoading,
+    sessionsError,
+    loadSessions,
+    createSession,
+    renameSession,
+    deleteSession,
     setActiveSession,
     getState,
     handleEvent,
     appendUserMessage,
+    setDraft,
+    uploadFiles,
+    retryAttachment,
+    removeAttachment,
+    clearReadyAttachments,
+    loadFolder,
+    openFolderSession,
+    refreshFolder,
     hydrateSession,
     removeSession,
     reset,

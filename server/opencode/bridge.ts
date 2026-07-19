@@ -12,13 +12,15 @@ import type { NormalizedEvent } from "../core/events.js";
  * delta / reasoning / tool-call w/ status / idle / error) via {@link normalizeEvent}, and
  * fans the normalized events out to its subscribers. It also exposes every raw event via
  * `onRawEvent` so the permission gate (V1.6) can read `permission.asked` off the same
- * single pump — the platform reads `event.subscribe()` exactly once. The per-session
+ * single pump — the platform reads OpenCode's `/global/event` stream exactly once. The global
+ * stream is load-bearing: directory-scoped `/event` would silently miss chats rooted in other
+ * connected folders. The per-session
  * routing + replay buffer over these normalized events is the SSE route (V1.5). See
  * ARCHITECTURE §6.
  */
 
-/** Minimal client slice the bridge needs: the `event.subscribe()` stream. */
-export type EventClient = Pick<OpencodeClient, "event">;
+/** Minimal client slice the bridge needs: the cross-directory `global.event()` stream. */
+export type EventClient = Pick<OpencodeClient, "global">;
 
 /**
  * The runtime error union carried by a `session.error` event's `properties.error`. Each
@@ -132,6 +134,27 @@ export function normalizeEvent(event: Event): NormalizedEvent | null {
       return normalizePart(event.properties.part);
     case "session.idle":
       return { kind: "idle", sessionID: event.properties.sessionID };
+    case "session.updated": {
+      const info = event.properties.info;
+      if (!info?.id || !info.title) return null;
+      return {
+        kind: "session_updated",
+        sessionID: info.id,
+        title: info.title,
+      };
+    }
+    case "session.status": {
+      const status = event.properties.status;
+      if (!status?.type) return null;
+      return {
+        kind: "session_status",
+        sessionID: event.properties.sessionID,
+        status: status.type,
+        ...(status.type === "retry"
+          ? { message: status.message }
+          : {}),
+      };
+    }
     case "session.error": {
       const sessionID = event.properties.sessionID;
       if (!sessionID) return null;
@@ -164,7 +187,7 @@ export interface EventBridgeOptions {
   /**
    * Observer for every raw event read from the runtime, before normalization. The permission
    * gate (FR8/FR10) hooks here to see `permission.asked`/`permission.replied`, and boot
-   * smoke tests hook here to observe the live stream — so `event.subscribe()` is read once.
+   * smoke tests hook here to observe the live stream — so `/global/event` is read once.
    */
   onRawEvent?: (event: Event) => void;
   /**
@@ -196,10 +219,10 @@ export function createEventBridge(
   }
 
   async function pump(): Promise<void> {
-    const { stream } = await client.event.subscribe({ signal: abort.signal });
+    const { stream } = await client.global.event({ signal: abort.signal });
     for await (const event of stream) {
       if (closed) break;
-      dispatch(event as Event);
+      dispatch((event as { directory: string; payload: Event }).payload);
     }
   }
 

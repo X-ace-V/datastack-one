@@ -11,7 +11,8 @@ read-only Postgres attach. No mocked demo path.
 > **Conversational agent.** The first version of this app was a six-step button wizard driven
 > by a deterministic runner. The engine was right; the shell was not — DataStack One is a
 > conversational, session-based agent, so the wizard pages and the runner were removed and the
-> chat shell replaced them. You now open a session, upload a CSV or attach a Postgres, and ask
+> chat shell replaced them. You now open a session, attach files in the composer, connect an
+> existing local data-project folder, or attach a Postgres, and ask
 > in plain English; an embedded [OpenCode](https://opencode.ai) agent plans and calls the data
 > tools live, streaming every step into the chat and pausing inline for your approval before
 > any write. See [`PRD.md`](./PRD.md) for the contract and [`DEMO.md`](./DEMO.md) for a
@@ -30,9 +31,13 @@ npm run dev          # backend on :3001, web app on :5173
 ```
 
 Open **<http://localhost:5173>** — a three-pane shell: the **session sidebar** (left), the
-**chat stream** (center), and the **data panel** (right). Create a session, upload a CSV, and
-ask a question; the agent's reasoning, tool calls, inline approvals, and query results stream
-in live. The backend is real too:
+**chat stream** (center), and the output-only **data panel** (right). Create a session, use the
+composer's **+** menu to upload one or more files or **start a new session from an existing
+folder**, and ask a question. A folder selection becomes that OpenCode session's real working
+directory—the same semantics as starting Claude Code or Codex in a project—not a read-only
+attachment to the app repository. The agent's reasoning, tool calls, inline approvals, and query
+results stream in live. Each chat has its own draft, attachments, working folder, execution warehouse, title, and background
+status, so switching chats does not stop or mix their work. The backend is real too:
 
 ```bash
 curl localhost:3001/api/health          # {"status":"ok","service":"datastack-one",...}
@@ -66,8 +71,11 @@ writes or executes is approval-gated.
 | Tool | Approval | What it does |
 |------|----------|--------------|
 | `list_sources` | — | The session's connected sources, by name + schema — never a path or URL. |
-| `profile_source` | — | `read_csv_auto` over a source: schema, types, rows, null %, candidate keys, date columns. |
+| `profile_source` | — | DuckDB profiling over a queryable file source: schema, types, rows, null %, candidate keys, date columns. |
 | `run_query` | — | A read-only `SELECT` over DuckDB (+ any attached Postgres); returns rows to the data panel. |
+| `list_workspace_files` | — | Lists supported files in the folder connected to this chat, using relative paths only. |
+| `read_workspace_file` | — | Reads a supported text project file or uploaded text attachment without exposing its absolute path. |
+| `write_workspace_file` | **ask** | Creates or replaces a supported text project file in the connected folder after inline approval. |
 | `attach_source` | **ask** | ATTACH a registered Postgres by **name**, read-only; the backend resolves name→URL — the tool never sees the secret. |
 | `land_parquet` | **ask** | `COPY … TO … (FORMAT PARQUET)` into `data/landing/`, partitioned by ingestion date. |
 | `load_warehouse` | **ask** | Parquet → `raw.source`, reporting the row count loaded. |
@@ -102,12 +110,17 @@ connections, approvals, the served endpoints, and the model catalog.
 |-------|---------|
 | `GET /api/health` | Liveness. |
 | `GET /api/models` | Live provider/model catalog (FR13). |
-| `POST /api/sessions` · `GET /api/sessions` | Create / list chat sessions (FR1). |
+| `POST /api/sessions` · `GET /api/sessions` | Create / list chat sessions (FR1). Create accepts optional `folderPath`; OpenCode starts with that authorized folder as its immutable cwd. |
+| `GET /api/sessions/status` | OpenCode's live status map for recovering background-running chats. |
 | `GET /api/sessions/:id` | A session with its message history (FR1). |
 | `GET /api/sessions/:id/lineage` | A session's audit trail: write tool calls, approvals, DQ results (FR12). |
 | `PATCH /api/sessions/:id` · `DELETE /api/sessions/:id` | Rename / delete a session (FR1). |
 | `POST /api/sessions/:id/chat` · `POST /api/sessions/:id/cancel` | Send an NL turn / cancel the in-flight turn (FR2). |
-| `POST /api/sessions/:id/sources` | Upload a CSV into a session → loaded in DuckDB + registered so the agent tools see it (FR4). |
+| `POST /api/sessions/:id/sources` · `GET /api/sessions/:id/sources` | Upload/list session-owned CSV, TSV, JSON/JSONL, Parquet, SQL, YAML, Markdown, or text files; queryable files are validated in DuckDB (FR4). |
+| `GET /api/folders` | Browse only server-approved local folders for the composer folder picker. |
+| `GET /api/sessions/:id/folder` | Read the session's immutable workspace root and indexed files. |
+| `POST /api/sessions/:id/folder` · `DELETE /api/sessions/:id/folder` | Compatibility guards: return `409` because an existing OpenCode session cannot change or remove its cwd; create another session with `folderPath`. |
+| `POST /api/sessions/:id/folder/refresh` | Rescan the connected folder and refresh its session-owned source index. |
 | `GET /api/events` | SSE chat stream: per-session routing + `?lastSeq` replay (FR3). |
 | `POST /api/connections` · `GET /api/connections` | Register / list database connections by name; the URL is entered only here and the list never returns a secret (FR5). |
 | `DELETE /api/connections/:name` | Remove a registered connection (FR5). |
@@ -121,6 +134,8 @@ connections, approvals, the served endpoints, and the model catalog.
 | `GET /api/projects/:id/served` | Endpoints this project has published. |
 | `GET /api/serve/:name` · `GET /api/serve/:name.csv` | The generated endpoint: JSON preview / CSV download (FR11). |
 | `POST /api/internal/tools/list_sources` · `POST /api/internal/tools/profile_source` · `POST /api/internal/tools/run_query` | Loopback the agent's read data-tools call; session-scoped, name-only (FR4/FR6/FR7). |
+| `POST /api/internal/tools/list_workspace_files` · `POST /api/internal/tools/read_workspace_file` | Loopback for relative-path-only connected-folder listing and bounded text reads. |
+| `POST /api/internal/tools/write_workspace_file` | Loopback for approval-gated create/replace inside the connected folder; traversal and secret filenames are rejected. |
 | `POST /api/internal/tools/run_dq_check` | Loopback for the read-only DQ tool; runs the reviewed checks and a failing run blocks a later publish for the session (FR9). |
 | `POST /api/internal/tools/land_parquet` · `POST /api/internal/tools/load_warehouse` · `POST /api/internal/tools/run_transform` · `POST /api/internal/tools/publish_serving` | Loopback for the four approval-gated write tools; executed only after inline approval (FR8). |
 | `POST /api/internal/tools/attach_source` | Loopback for the ask-gated attach tool; resolves a connection name→URL and ATTACHes it read-only after inline approval — the URL never reaches the model (FR5b). |
@@ -129,7 +144,8 @@ The `internal/tools/*` routes are the loopback the in-process OpenCode plugin
 (`server/tools/plugin.ts`) calls — the agent's tools run in a separate runtime with no
 direct store access, so they reach the store through these. They take a session id and a
 source **name** and never a raw path or credential (FR5b). The write routes
-(`land_parquet`/`load_warehouse`/`run_transform`/`publish_serving`/`attach_source`) each
+(`land_parquet`/`load_warehouse`/`run_transform`/`publish_serving`/`attach_source`/
+`write_workspace_file`) each
 pause on an inline human approval before executing, so nothing is written or attached
 unapproved (FR8/FR10).
 
@@ -140,7 +156,7 @@ unapproved (FR8/FR10).
 ```
 server/
   core/        pure domain logic — no fs, no net, no process (schemas, SQL builders, parsing)
-  store/       DuckDB: platform metadata tables, projects, runs, artifacts, lineage, registry
+  store/       DuckDB: control metadata + a lazy isolated execution warehouse per chat
   tools/       the data-engineering tools (profile, land, warehouse, transform, dq, serve)
   opencode/    the embedded agent runtime: client, model catalog, event bridge, permissions
   serving/     the dynamic served-table reader
@@ -148,7 +164,7 @@ server/
 web/src/       React 19 + Vite + Tailwind v4 — the chat shell (sidebar · chat stream · data panel)
 fixtures/      synthetic lending CSV + the plain-English rules doc (committed)
 tests/         cross-cutting suites
-data/          warehouse, landing, uploads, artifacts, serving exports (gitignored, disposable)
+data/          control DB, per-session warehouses, landing, uploads, artifacts, serving (gitignored)
 ```
 
 `server/core` is pure and imported by everything else; nothing in `core` imports back out.
@@ -182,9 +198,11 @@ a free model.
 
 ## Status
 
-**MVP complete.** The conversational shell is live end to end: create a session, upload a CSV,
-ask in plain English, and the agent profiles, queries, and — with an inline approval on every
-write — builds and publishes a served report, all streamed into the chat. The PRD §5 acceptance
+**MVP complete.** The conversational shell is live end to end: create several independent
+sessions, attach multiple files or start a folder-rooted session from the composer, switch between
+background-running chats, and let the agent profile, query, edit approved project files, and —
+with an inline approval on every write — build and publish a served report. Session titles come
+from OpenCode's native title generator and update live in the sidebar. The PRD §5 acceptance
 criteria are asserted by `tests/acceptance.test.ts`, which replays a captured free-model
 (`opencode/big-pickle`) run against the real DuckDB path. The v1 wizard that proved the engine
 was removed; a form was the wrong interface for this product.

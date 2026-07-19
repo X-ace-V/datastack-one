@@ -27,6 +27,12 @@ export function App() {
   // Settings → Connections opens as a modal overlay above the conversation (V5.3), not a route.
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  // The sidebar is driven by the same central index that global SSE events update, so an
+  // inactive session can change title/status without forcing a refetch or being selected.
+  useEffect(() => {
+    void store.loadSessions();
+  }, [store.loadSessions]);
+
   // Reopen (V6.2, FR1): when a session becomes active with no live state (a fresh page load, or
   // one created in a prior server run), fetch its persisted history and reconstruct the transcript
   // — messages AND their tool-block history. `hydrateSession` no-ops if the session already has
@@ -49,6 +55,7 @@ export function App() {
               id: m.id,
               content: m.content,
               blocks: m.blocks,
+              attachments: m.attachments,
             })),
         );
       })
@@ -65,6 +72,12 @@ export function App() {
       <Sidebar
         activeSessionId={store.activeSessionId}
         onSelectSession={store.setActiveSession}
+        sessions={store.sessions}
+        loading={store.sessionsLoading}
+        loadError={store.sessionsError}
+        onCreateSession={store.createSession}
+        onRenameSession={store.renameSession}
+        onDeleteSession={store.deleteSession}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
@@ -85,6 +98,14 @@ export function App() {
               sessionId={store.activeSessionId}
               state={store.activeState}
               appendUserMessage={store.appendUserMessage}
+              setDraft={store.setDraft}
+              uploadFiles={store.uploadFiles}
+              retryAttachment={store.retryAttachment}
+              removeAttachment={store.removeAttachment}
+              clearReadyAttachments={store.clearReadyAttachments}
+              loadFolder={store.loadFolder}
+              openFolderSession={store.openFolderSession}
+              refreshFolder={store.refreshFolder}
             />
           </>
         ) : (

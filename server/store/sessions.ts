@@ -6,6 +6,8 @@ import {
   type Message,
   type MessageRole,
   type Session,
+  type AttachmentRef,
+  AttachmentRefSchema,
 } from "../core/sessions.js";
 import { PersistedBlocksSchema, type PersistedBlock } from "../core/transcript.js";
 
@@ -31,7 +33,7 @@ const SESSION_COLUMNS =
  * is the raw JSON string (or NULL) the read parses into {@link PersistedBlock}s.
  */
 const MESSAGE_COLUMNS =
-  "id, session_id, seq, role, content, blocks, " +
+  "id, session_id, seq, role, content, blocks, attachments, " +
   "CAST(created_at AS VARCHAR) AS created_at";
 
 /** Map a raw `platform.sessions` row (snake_case, nullable model) to a {@link Session}. */
@@ -57,6 +59,10 @@ function rowToMessage(row: Record<string, unknown>): Message {
     typeof rawBlocks === "string" && rawBlocks.length > 0
       ? PersistedBlocksSchema.parse(JSON.parse(rawBlocks))
       : undefined;
+  const attachments =
+    typeof row.attachments === "string" && row.attachments.length > 0
+      ? JSON.parse(row.attachments).map((item: unknown) => AttachmentRefSchema.parse(item))
+      : undefined;
   return MessageSchema.parse({
     id: row.id,
     sessionId: row.session_id,
@@ -66,6 +72,7 @@ function rowToMessage(row: Record<string, unknown>): Message {
     content: row.content,
     createdAt: row.created_at,
     ...(blocks !== undefined ? { blocks } : {}),
+    ...(attachments !== undefined ? { attachments } : {}),
   });
 }
 
@@ -173,6 +180,8 @@ export async function deleteSession(
   }
   await store.run(`DELETE FROM platform.messages WHERE session_id = $1`, [id]);
   await store.run(`DELETE FROM platform.lineage WHERE session_id = $1`, [id]);
+  await store.run(`DELETE FROM platform.session_sources WHERE session_id = $1`, [id]);
+  await store.run(`DELETE FROM platform.session_folders WHERE session_id = $1`, [id]);
   await store.run(`DELETE FROM platform.sessions WHERE id = $1`, [id]);
   return true;
 }
@@ -185,6 +194,7 @@ export interface AppendMessageInput {
   role: MessageRole;
   /** The message text. */
   content: string;
+  attachments?: AttachmentRef[];
 }
 
 /**
@@ -205,9 +215,18 @@ export async function appendMessage(
   const id = randomUUID();
 
   await store.run(
-    `INSERT INTO platform.messages (id, session_id, seq, role, content)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [id, input.sessionId, seq, input.role, input.content],
+    `INSERT INTO platform.messages (id, session_id, seq, role, content, attachments)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      id,
+      input.sessionId,
+      seq,
+      input.role,
+      input.content,
+      input.attachments && input.attachments.length > 0
+        ? JSON.stringify(input.attachments)
+        : null,
+    ],
   );
   // Appending a message counts as activity, so the session floats to the top of the sidebar.
   await store.run(

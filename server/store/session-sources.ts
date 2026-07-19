@@ -15,7 +15,7 @@ import { SessionSourceSchema, type SessionSource } from "../core/session-sources
  * {@link SessionSourceSchema} can validate directly.
  */
 const SESSION_SOURCE_COLUMNS =
-  "session_id, name, kind, path, row_count, " +
+  "session_id, name, kind, path, origin, relative_path, row_count, " +
   "CAST(created_at AS VARCHAR) AS created_at";
 
 /** Map a raw `platform.session_sources` row (snake_case, bigint count) to a {@link SessionSource}. */
@@ -25,6 +25,8 @@ function rowToSessionSource(row: Record<string, unknown>): SessionSource {
     name: row.name,
     kind: row.kind,
     path: row.path,
+    origin: row.origin ?? "upload",
+    relativePath: row.relative_path ?? null,
     // DuckDB returns BIGINT columns as bigint; the contract is a plain number.
     rowCount: row.row_count == null ? null : Number(row.row_count),
     createdAt: row.created_at,
@@ -43,6 +45,10 @@ export interface RegisterSessionSourceInput {
   kind?: string;
   /** Profiled row count, if already known; null (the default) until profiling runs. */
   rowCount?: number | null;
+  /** How it entered the session; used to disconnect one folder without removing uploads. */
+  origin?: "upload" | "folder" | "connection";
+  /** Folder-relative path when origin is `folder`; never an absolute model-facing path. */
+  relativePath?: string | null;
 }
 
 /**
@@ -56,11 +62,14 @@ export async function registerSessionSource(
   input: RegisterSessionSourceInput,
 ): Promise<SessionSource> {
   await store.run(
-    `INSERT INTO platform.session_sources (session_id, name, kind, path, row_count)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO platform.session_sources
+       (session_id, name, kind, path, origin, relative_path, row_count)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      ON CONFLICT (session_id, name) DO UPDATE SET
        kind = excluded.kind,
        path = excluded.path,
+       origin = excluded.origin,
+       relative_path = excluded.relative_path,
        row_count = excluded.row_count,
        created_at = now()`,
     [
@@ -68,6 +77,8 @@ export async function registerSessionSource(
       input.name,
       input.kind ?? "csv",
       input.path,
+      input.origin ?? "upload",
+      input.relativePath ?? null,
       input.rowCount ?? null,
     ],
   );
@@ -107,4 +118,24 @@ export async function listSessionSources(
     [sessionId],
   );
   return rows.map(rowToSessionSource);
+}
+
+/** Remove every source registration for a session (used when mirroring the control registry). */
+export async function clearSessionSources(
+  store: WarehouseStore,
+  sessionId: string,
+): Promise<void> {
+  await store.run("DELETE FROM platform.session_sources WHERE session_id = $1", [sessionId]);
+}
+
+/** Remove only registrations introduced by one source channel (e.g. a disconnected folder). */
+export async function clearSessionSourcesByOrigin(
+  store: WarehouseStore,
+  sessionId: string,
+  origin: "upload" | "folder" | "connection",
+): Promise<void> {
+  await store.run(
+    "DELETE FROM platform.session_sources WHERE session_id = $1 AND origin = $2",
+    [sessionId, origin],
+  );
 }

@@ -52,6 +52,14 @@ export function safeServedName(name: string): string {
   return cleaned.length > 0 ? cleaned : DEFAULT_SERVED_NAME;
 }
 
+/**
+ * Give a chat-owned publication a globally unique endpoint name. The legacy serving registry is
+ * keyed by URL name, so two independent chats publishing `report` must not overwrite each other.
+ */
+export function sessionScopedServedName(sessionId: string, name: string): string {
+  return `${safeServedName(sessionId)}-${safeServedName(name)}`;
+}
+
 /** The REST endpoint a served name is queryable at (FR10). */
 export function servedEndpoint(name: string): string {
   return `${SERVE_ROUTE_PREFIX}/${name}`;

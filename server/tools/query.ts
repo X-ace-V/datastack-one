@@ -1,5 +1,7 @@
 import type { WarehouseStore } from "../store/duckdb.js";
 import { listSessionSources } from "../store/session-sources.js";
+import { dataSourceRelation } from "./data-source.js";
+import { isQueryableWorkspaceKind, type WorkspaceFileKind } from "../core/workspace.js";
 import {
   assertReadOnlySelect,
   buildQueryResult,
@@ -14,17 +16,14 @@ import {
  * An I/O module (it queries DuckDB), so it lives under `server/tools`, not `server/core`; the pure
  * read-only guard, row cap, and result shape live in {@link file://../core/query.ts}.
  *
- * The agent addresses a source by its **name** (FR5b): before running the query, each CSV source
+ * The agent addresses a source by its **name** (FR5b): before running the query, each queryable file source
  * connected to the session is exposed as a DuckDB view of that name (`… AS SELECT * FROM
  * read_csv_auto(<path>)`, the path bound as a parameter), so `SELECT … FROM <name>` resolves. The
  * warehouse's real `raw`/`staging`/`marts` tables are already queryable by their qualified names.
  *
  * The views live in `main` and are **dropped as soon as the query finishes** (a `finally`): the
- * {@link WarehouseStore} wraps ONE DuckDB connection (single-user localhost, ARCHITECTURE §1.4), so
- * a view left behind would let a later query — even from another session — resolve a bare source
- * name it never connected. Creating them per-call and tearing them down keeps each query scoped to
- * exactly the sources of its own session. (True simultaneous cross-session queries on one connection
- * are outside the single-user MVP; calls run sequentially here.)
+ * {@link WarehouseStore} is already private to this chat in production, but creating views per-call
+ * and tearing them down keeps even injected/shared test stores scoped to the sources in the request.
  */
 
 /** Double-quote a DuckDB identifier, escaping embedded quotes, so a source name can't inject. */
@@ -39,20 +38,23 @@ export async function runQuery(
   // Reject anything but a single read-only SELECT before touching the warehouse.
   const sql = assertReadOnlySelect(input.sql);
 
-  // Expose each connected CSV source under its name so `FROM <name>` resolves; remember which
+  // Expose each connected queryable file source under its name so `FROM <name>` resolves; remember which
   // views were created so they can be dropped once the query has run.
   const sources = await listSessionSources(store, input.sessionId);
   const created: string[] = [];
   try {
     for (const source of sources) {
-      if (source.kind !== "csv") continue;
+      if (
+        source.kind === "postgres" ||
+        !isQueryableWorkspaceKind(source.kind as WorkspaceFileKind)
+      ) continue;
       // A `?` parameter cannot be bound inside a CREATE VIEW (DuckDB rejects a prepared parameter
       // in DDL), so the backend-controlled path is single-quote-escaped into the SQL literal —
       // the same treatment the land/serve COPY destinations use. It is never model-produced.
       const pathLiteral = source.path.replace(/'/g, "''");
       await store.run(
         `CREATE OR REPLACE VIEW main.${quoteIdent(source.name)} AS ` +
-          `SELECT * FROM read_csv_auto('${pathLiteral}')`,
+          `SELECT * FROM ${dataSourceRelation(source.kind, `'${pathLiteral}'`)}`,
       );
       created.push(source.name);
     }

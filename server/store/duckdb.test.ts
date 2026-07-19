@@ -222,4 +222,17 @@ describe("DuckDB warehouse store", () => {
     );
     expect(rows.map((r) => r.name)).toEqual(["Persisted"]);
   });
+
+  it("checkpoints on-disk migrations before returning the store", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "datastack-store-checkpoint-"));
+    tempDirs.push(dir);
+    const dbPath = join(dir, "warehouse.duckdb");
+
+    await freshStore(dbPath);
+
+    // Catalog migrations must not remain in a crash-recovery WAL. DuckDB 1.5.x
+    // can fail to replay an ADD COLUMN ... DEFAULT catalog record after an
+    // unclean shutdown, making the backend unable to boot.
+    await expect(stat(`${dbPath}.wal`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });

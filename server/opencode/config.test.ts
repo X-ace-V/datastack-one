@@ -48,6 +48,7 @@ describe("ASK_TOOLS approval gate", () => {
       "run_transform",
       "publish_serving",
       "attach_source",
+      "write_workspace_file",
     ]);
   });
 

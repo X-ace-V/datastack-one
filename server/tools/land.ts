@@ -9,9 +9,10 @@ import {
   LandResultSchema,
   type LandResult,
 } from "../core/landing.js";
+import { dataSourceRelation } from "./data-source.js";
 
 /**
- * The `land_parquet` tool (PRD FR4, ARCHITECTURE §5). It writes the raw uploaded CSV out to
+ * The `land_parquet` tool (PRD FR4, ARCHITECTURE §5). It writes a connected queryable data file to
  * `data/landing/<dataset>/` as Parquet, partitioned by ingestion date via DuckDB's Hive layout
  * (`ingestion_date=YYYY-MM-DD/*.parquet`). This is the "Land Parquet" pipeline stage — the
  * first tool that touches the data plane by writing, so it is permission **`ask`** (it is on
@@ -28,8 +29,10 @@ export const DEFAULT_LANDING_DIR = "data/landing";
 export interface LandParquetInput {
   /** Landing root (e.g. `data/landing`). */
   landingDir: string;
-  /** Path to the source CSV to land (an uploaded file under `data/uploads/`). */
+  /** Backend-only path to the queryable uploaded/folder source to land. */
   sourcePath: string;
+  /** Validated local data-file kind (csv/tsv/json/jsonl/parquet). */
+  sourceKind?: string;
   /** Logical dataset name; sanitized to a safe directory basename before use. */
   dataset: string;
   /** Ingestion date `YYYY-MM-DD` to partition under; defaults to today (UTC) when omitted. */
@@ -42,7 +45,7 @@ function quoteLiteral(value: string): string {
 }
 
 /**
- * Land the CSV at `input.sourcePath` as Hive-partitioned Parquet under
+ * Land the data file at `input.sourcePath` as Hive-partitioned Parquet under
  * `<landingDir>/<dataset>/ingestion_date=<date>/`. The source path and ingestion date are
  * bound as query parameters (never string-concatenated); the destination path — derived from
  * the server-controlled landing dir and the sanitized dataset name — is a single-quoted
@@ -50,7 +53,7 @@ function quoteLiteral(value: string): string {
  * read back to count the landed rows, so the returned {@link LandResult} reflects what actually
  * persisted rather than an echo of the input.
  *
- * Throws if `ingestionDate` is malformed or the source CSV cannot be read (the `COPY` error
+ * Throws if `ingestionDate` is malformed or the source file cannot be read (the `COPY` error
  * propagates) — the caller (T4.4 runner) maps those to a run-step failure.
  */
 export async function landParquet(
@@ -73,7 +76,8 @@ export async function landParquet(
   // OVERWRITE_OR_IGNORE makes re-landing the same date replace just that partition (idempotent
   // per run). The date and source path are bound; only the vetted destination is a literal.
   await store.run(
-    `COPY (SELECT *, CAST(? AS DATE) AS ${INGESTION_DATE_COLUMN} FROM read_csv_auto(?)) ` +
+    `COPY (SELECT *, CAST(? AS DATE) AS ${INGESTION_DATE_COLUMN} FROM ` +
+      `${dataSourceRelation(input.sourceKind ?? "csv", "?")}) ` +
       `TO ${quoteLiteral(landingPath)} ` +
       `(FORMAT PARQUET, PARTITION_BY (${INGESTION_DATE_COLUMN}), OVERWRITE_OR_IGNORE)`,
     [ingestionDate, input.sourcePath],

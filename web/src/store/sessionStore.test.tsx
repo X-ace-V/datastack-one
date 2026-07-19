@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createEmptySessionState,
   reduce,
@@ -56,6 +56,69 @@ describe("reduce — user turns", () => {
       { type: "user-message", id: "u1", text: "retry" },
     ]);
     expect(s.error).toBeNull();
+  });
+
+  it("keeps attachment references on the user turn", () => {
+    const attachments = [{ name: "loans", kind: "csv" }];
+    const s = run([{ type: "user-message", id: "u1", text: "", attachments }]);
+    expect(s.messages[0]).toEqual({ role: "user", id: "u1", content: "", attachments });
+  });
+});
+
+describe("reduce — composer and folder state", () => {
+  it("updates draft, attachment queue, and connected folder without touching the transcript", () => {
+    const file = new File(["id\n1\n"], "loans.csv");
+    const attachment = {
+      id: "a1",
+      file,
+      name: file.name,
+      size: file.size,
+      status: "uploading" as const,
+    };
+    const state = run([
+      { type: "set-draft", text: "profile this" },
+      { type: "add-attachments", attachments: [attachment] },
+      {
+        type: "folder",
+        folder: {
+          sessionId: SID,
+          name: "pipeline",
+          path: "/allowed/pipeline",
+          workspaceRoot: true,
+          connectedAt: "2026-07-19",
+        },
+        files: [
+          {
+            path: "models/daily.sql",
+            name: "daily.sql",
+            kind: "sql",
+            size: 8,
+            modifiedAt: "2026-07-19",
+            queryable: false,
+          },
+        ],
+      },
+    ]);
+    expect(state.draft).toBe("profile this");
+    expect(state.attachments).toEqual([attachment]);
+    expect(state.folder?.name).toBe("pipeline");
+    expect(state.workspaceFiles[0]?.path).toBe("models/daily.sql");
+    expect(state.messages).toEqual([]);
+  });
+
+  it("maps OpenCode busy/retry/idle statuses onto a session's working state", () => {
+    const busy = run([ev({ kind: "session_status", sessionID: SID, status: "busy" })]);
+    expect(busy.isWorking).toBe(true);
+    const retry = reduce(busy, ev({
+      kind: "session_status",
+      sessionID: SID,
+      status: "retry",
+      message: "provider retry",
+    }));
+    expect(retry.isWorking).toBe(true);
+    expect(retry.error).toBe("provider retry");
+    expect(reduce(retry, ev({ kind: "session_status", sessionID: SID, status: "idle" })).isWorking)
+      .toBe(false);
   });
 });
 
@@ -453,6 +516,22 @@ describe("useSessionStore — active-session mirroring", () => {
     expect(result.current.activeState.isWorking).toBe(true);
   });
 
+  it("keeps drafts and attachment queues owned by the session while switching", () => {
+    const { result } = renderHook(() => useSessionStore());
+    act(() => {
+      result.current.setActiveSession("ses_a");
+      result.current.setDraft("ses_a", "alpha draft");
+    });
+    act(() => {
+      result.current.setActiveSession("ses_b");
+      result.current.setDraft("ses_b", "beta draft");
+    });
+    expect(result.current.activeState.draft).toBe("beta draft");
+    expect(result.current.getState("ses_a")?.draft).toBe("alpha draft");
+    act(() => result.current.setActiveSession("ses_a"));
+    expect(result.current.activeState.draft).toBe("alpha draft");
+  });
+
   it("removeSession drops state and clears activeState when it was active", () => {
     const { result } = renderHook(() => useSessionStore());
     act(() => result.current.setActiveSession("ses_a"));
@@ -465,5 +544,148 @@ describe("useSessionStore — active-session mirroring", () => {
     expect(result.current.getState("ses_a")).toBeUndefined();
     expect(result.current.activeSessionId).toBeNull();
     expect(result.current.activeState).toEqual(createEmptySessionState());
+  });
+});
+
+describe("useSessionStore — central background session index", () => {
+  it("starts a new active session in the selected folder and preserves the previous chat", async () => {
+    const created = {
+      id: "ses_folder",
+      title: "New session",
+      model: null,
+      createdAt: "2026-07-19",
+      updatedAt: "2026-07-19",
+    };
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === "/api/sessions" && init?.method === "POST") {
+        return { ok: true, json: async () => created };
+      }
+      if (input === "/api/sessions/ses_folder/folder") {
+        return {
+          ok: true,
+          json: async () => ({
+            folder: {
+              sessionId: "ses_folder",
+              name: "pipeline",
+              path: "/allowed/pipeline",
+              workspaceRoot: true,
+              connectedAt: "2026-07-19",
+            },
+            files: [],
+          }),
+        };
+      }
+      throw new Error(`unexpected request ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { result } = renderHook(() => useSessionStore());
+      act(() => {
+        result.current.setActiveSession("ses_previous");
+        result.current.setDraft("ses_previous", "keep this draft");
+      });
+      await act(async () => {
+        await result.current.openFolderSession("/allowed/pipeline");
+      });
+
+      expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
+        folderPath: "/allowed/pipeline",
+      });
+      expect(result.current.activeSessionId).toBe("ses_folder");
+      expect(result.current.activeState.folder).toMatchObject({
+        path: "/allowed/pipeline",
+        workspaceRoot: true,
+      });
+      expect(result.current.getState("ses_previous")?.draft).toBe("keep this draft");
+      expect(result.current.sessions[0]).toMatchObject({ id: "ses_folder", status: "idle" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("recovers busy sessions and applies an OpenCode title event that arrived before the list", async () => {
+    const session = {
+      id: "ses_a",
+      title: "New session",
+      model: null,
+      createdAt: "2026-07-19",
+      updatedAt: "2026-07-19",
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => ({
+      ok: true,
+      json: async () =>
+        input === "/api/sessions/status"
+          ? { statuses: { ses_a: { type: "busy" } } }
+          : { sessions: [session] },
+    })));
+    try {
+      const { result } = renderHook(() => useSessionStore());
+      act(() =>
+        result.current.handleEvent({
+          kind: "session_updated",
+          sessionID: "ses_a",
+          title: "Profile customer loans",
+        }),
+      );
+      await act(async () => {
+        await result.current.loadSessions();
+      });
+      expect(result.current.sessions).toEqual([
+        expect.objectContaining({
+          id: "ses_a",
+          title: "Profile customer loans",
+          status: "working",
+        }),
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("updates an inactive session's visible title and status from the global event stream", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => ({
+      ok: true,
+      json: async () =>
+        input === "/api/sessions/status"
+          ? { statuses: {} }
+          : {
+              sessions: [
+                {
+                  id: "ses_background",
+                  title: "New session",
+                  model: null,
+                  createdAt: "2026-07-19",
+                  updatedAt: "2026-07-19",
+                },
+              ],
+            },
+    })));
+    try {
+      const { result } = renderHook(() => useSessionStore());
+      await act(async () => {
+        await result.current.loadSessions();
+      });
+      act(() => {
+        result.current.setActiveSession("ses_foreground");
+        result.current.handleEvent({
+          kind: "session_updated",
+          sessionID: "ses_background",
+          title: "Build daily revenue model",
+        });
+        result.current.handleEvent({
+          kind: "session_status",
+          sessionID: "ses_background",
+          status: "busy",
+        });
+      });
+      expect(result.current.activeSessionId).toBe("ses_foreground");
+      expect(result.current.sessions[0]).toMatchObject({
+        id: "ses_background",
+        title: "Build daily revenue model",
+        status: "working",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -5,8 +5,10 @@ import {
   SessionRuntimeError,
   type SessionManagerClient,
 } from "./sessions.js";
-import { SessionModelError } from "../core/sessions.js";
+import { SessionAttachmentError, SessionModelError } from "../core/sessions.js";
 import { getSession } from "../store/sessions.js";
+import { registerSessionSource } from "../store/session-sources.js";
+import { connectSessionFolder } from "../store/session-folders.js";
 
 /**
  * Unit tests for the SessionManager (V1.1, FR1). The OpenCode runtime is a *mocked* client
@@ -48,6 +50,7 @@ describe("SessionManager", () => {
       delete: ReturnType<typeof vi.fn>;
       prompt: ReturnType<typeof vi.fn>;
       abort: ReturnType<typeof vi.fn>;
+      status: ReturnType<typeof vi.fn>;
     };
   } {
     let counter = 0;
@@ -59,7 +62,10 @@ describe("SessionManager", () => {
           }
           counter += 1;
           return {
-            data: { id: `ses_${counter}`, title: body?.title ?? "" },
+            data: {
+              id: `ses_${counter}`,
+              title: body?.title ?? "New session - 2026-07-19T00:00:00.000Z",
+            },
             error: undefined,
           };
         }),
@@ -75,6 +81,10 @@ describe("SessionManager", () => {
             ? { data: undefined, error: opts.abortError }
             : { data: true, error: undefined },
         ),
+        status: vi.fn(async () => ({
+          data: { ses_1: { type: "busy" } },
+          error: undefined,
+        })),
       },
     } as never;
   }
@@ -106,10 +116,23 @@ describe("SessionManager", () => {
     const manager = new SessionManager(client, store);
 
     const session = await manager.create();
-    expect(session.title).toBe("New session");
+    expect(session.title).toBe("New session - 2026-07-19T00:00:00.000Z");
     expect(session.model).toBeNull();
     expect(client.session.create).toHaveBeenCalledWith({
-      body: { title: "New session" },
+      body: {},
+    });
+  });
+
+  it("creates OpenCode in the selected folder instead of the backend directory", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+
+    const session = await manager.create({ folderPath: "/allowed/loan-pipeline" });
+    expect(session.id).toBe("ses_1");
+    expect(client.session.create).toHaveBeenCalledWith({
+      body: {},
+      query: { directory: "/allowed/loan-pipeline" },
     });
   });
 
@@ -169,6 +192,42 @@ describe("SessionManager", () => {
       body: { title: "New" },
     });
     expect((await getSession(store, created.id))?.title).toBe("New");
+  });
+
+  it("mirrors OpenCode's generated title without writing back to the runtime", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create();
+
+    const updated = await manager.syncRuntimeTitle(created.id, "Investigate loan defaults");
+    expect(updated?.title).toBe("Investigate loan defaults");
+    expect((await getSession(store, created.id))?.title).toBe("Investigate loan defaults");
+    expect(client.session.update).not.toHaveBeenCalled();
+  });
+
+  it("returns OpenCode's live status map for reload recovery", async () => {
+    const manager = new SessionManager(mockClient(), await freshStore());
+    await expect(manager.status()).resolves.toEqual({ ses_1: { type: "busy" } });
+  });
+
+  it("queries live status for every folder-rooted OpenCode instance", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ folderPath: "/allowed/pipeline" });
+    await connectSessionFolder(store, {
+      sessionId: created.id,
+      name: "pipeline",
+      path: "/allowed/pipeline",
+      workspaceRoot: true,
+    });
+
+    await manager.status();
+    expect(client.session.status).toHaveBeenCalledWith({});
+    expect(client.session.status).toHaveBeenCalledWith({
+      query: { directory: "/allowed/pipeline" },
+    });
   });
 
   it("does not touch the runtime when renaming an unknown session", async () => {
@@ -266,6 +325,99 @@ describe("SessionManager", () => {
       path: { id: created.id },
       body: { parts: [{ type: "text", text: "profile this csv" }] },
     });
+  });
+
+  it("keeps every turn addressed to the session's folder-rooted runtime", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ folderPath: "/allowed/pipeline" });
+    await connectSessionFolder(store, {
+      sessionId: created.id,
+      name: "pipeline",
+      path: "/allowed/pipeline",
+      workspaceRoot: true,
+    });
+
+    await manager.chat(created.id, { text: "which directory are you in?" });
+    expect(client.session.prompt).toHaveBeenCalledWith({
+      path: { id: created.id },
+      query: { directory: "/allowed/pipeline" },
+      body: { parts: [{ type: "text", text: "which directory are you in?" }] },
+    });
+  });
+
+  it("persists same-session attachments and gives OpenCode only safe source names", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ title: "Chat" });
+    await registerSessionSource(store, {
+      sessionId: created.id,
+      name: "loans",
+      kind: "csv",
+      path: "/private/user/customer-data/loans.csv",
+      origin: "upload",
+    });
+
+    const message = await manager.chat(created.id, {
+      text: "find overdue accounts",
+      attachments: [{ name: "loans", kind: "csv" }],
+    });
+
+    expect(message?.attachments).toEqual([{ name: "loans", kind: "csv" }]);
+    expect((await manager.get(created.id))?.messages[0]?.attachments).toEqual([
+      { name: "loans", kind: "csv" },
+    ]);
+    const prompt = client.session.prompt.mock.calls[0]?.[0];
+    expect(prompt.body.parts[0].text).toContain("loans (csv)");
+    expect(JSON.stringify(prompt)).not.toContain("/private/user");
+  });
+
+  it("supports a file-only turn and asks the agent to inspect it", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const created = await manager.create({ title: "Chat" });
+    await registerSessionSource(store, {
+      sessionId: created.id,
+      name: "pipeline",
+      kind: "sql",
+      path: "/private/pipeline.sql",
+      origin: "upload",
+    });
+
+    const message = await manager.chat(created.id, {
+      attachments: [{ name: "pipeline", kind: "sql" }],
+    });
+    expect(message?.content).toBe("");
+    expect(client.session.prompt.mock.calls[0]?.[0].body.parts[0].text).toMatch(
+      /^Inspect the attached files/i,
+    );
+  });
+
+  it("rejects an attachment owned by another session before persisting or prompting", async () => {
+    const store = await freshStore();
+    const client = mockClient();
+    const manager = new SessionManager(client, store);
+    const alpha = await manager.create({ title: "Alpha" });
+    const beta = await manager.create({ title: "Beta" });
+    await registerSessionSource(store, {
+      sessionId: beta.id,
+      name: "private_beta",
+      kind: "csv",
+      path: "/private/beta.csv",
+      origin: "upload",
+    });
+
+    await expect(
+      manager.chat(alpha.id, {
+        text: "inspect it",
+        attachments: [{ name: "private_beta", kind: "csv" }],
+      }),
+    ).rejects.toBeInstanceOf(SessionAttachmentError);
+    expect((await manager.get(alpha.id))?.messages).toEqual([]);
+    expect(client.session.prompt).not.toHaveBeenCalled();
   });
 
   it("returns without awaiting the streamed turn to completion", async () => {

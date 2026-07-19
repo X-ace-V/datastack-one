@@ -19,6 +19,8 @@ export const SessionSourceSchema = z.object({
   name: z.string().min(1),
   kind: z.string().min(1),
   path: z.string().min(1),
+  origin: z.enum(["upload", "folder", "connection"]),
+  relativePath: z.string().nullable(),
   rowCount: z.number().int().nonnegative().nullable(),
   createdAt: z.string().min(1),
 });
@@ -51,6 +53,8 @@ export const SessionSourceViewSchema = z.object({
   sessionId: z.string().min(1),
   name: z.string().min(1),
   kind: z.string().min(1),
+  origin: z.enum(["upload", "folder", "connection"]),
+  relativePath: z.string().nullable(),
   rowCount: z.number().int().nonnegative().nullable(),
   createdAt: z.string().min(1),
 });
@@ -62,6 +66,8 @@ export function toSessionSourceView(source: SessionSource): SessionSourceView {
     sessionId: source.sessionId,
     name: source.name,
     kind: source.kind,
+    origin: source.origin,
+    relativePath: source.relativePath,
     rowCount: source.rowCount,
     createdAt: source.createdAt,
   };
@@ -99,7 +105,14 @@ export function attachedTableName(
  */
 export function sourceNameFromFilename(filename: string): string {
   const base = filename.split(/[\\/]/).pop() ?? "";
-  const stem = base.replace(/\.csv$/i, "");
+  const stem = base.replace(/\.[^.]+$/i, "");
+  const cleaned = stem.replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  return cleaned.length > 0 ? cleaned : "source";
+}
+
+/** Derive a collision-resistant model-facing name from a folder-relative data-file path. */
+export function sourceNameFromRelativePath(relativePath: string): string {
+  const stem = relativePath.replace(/\.[^.\\/]+$/i, "");
   const cleaned = stem.replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
   return cleaned.length > 0 ? cleaned : "source";
 }

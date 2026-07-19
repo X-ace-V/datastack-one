@@ -79,7 +79,7 @@ describe("formatSseFrame", () => {
  * browser store that would mis-render it.
  */
 describe("NormalizedEventSchema", () => {
-  it("enumerates exactly the seven chat-event kinds", () => {
+  it("enumerates every chat and session-lifecycle event kind", () => {
     expect([...NORMALIZED_EVENT_KINDS]).toEqual([
       "text",
       "reasoning",
@@ -88,6 +88,8 @@ describe("NormalizedEventSchema", () => {
       "error",
       "approval",
       "approval_resolved",
+      "session_updated",
+      "session_status",
     ]);
   });
 
@@ -110,9 +112,13 @@ describe("NormalizedEventSchema", () => {
     };
     const idle: NormalizedEvent = { kind: "idle", sessionID: "s" };
     const err: NormalizedEvent = { kind: "error", sessionID: "s", message: "boom" };
+    const updated: NormalizedEvent = { kind: "session_updated", sessionID: "s", title: "Loans" };
+    const status: NormalizedEvent = { kind: "session_status", sessionID: "s", status: "busy" };
     expect(NormalizedEventSchema.parse(text)).toEqual(text);
     expect(NormalizedEventSchema.parse(idle)).toEqual(idle);
     expect(NormalizedEventSchema.parse(err)).toEqual(err);
+    expect(NormalizedEventSchema.parse(updated)).toEqual(updated);
+    expect(NormalizedEventSchema.parse(status)).toEqual(status);
   });
 
   it("requires a non-empty sessionID on every kind (the routing key)", () => {

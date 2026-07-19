@@ -209,6 +209,7 @@ describe("DataPanel", () => {
     render(<DataPanel state={createEmptySessionState()} />);
     expect(screen.getByRole("complementary", { name: "Data panel" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Data" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /attach|upload|folder/i })).toBeNull();
   });
 
   it("renders the audit trail section (V4.4) when a session is active", async () => {

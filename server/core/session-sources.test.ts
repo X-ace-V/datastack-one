@@ -20,6 +20,8 @@ describe("session-source contract", () => {
     name: "loans",
     kind: "csv",
     path: "data/uploads/ses_1/abc-loans.csv",
+    origin: "upload",
+    relativePath: null,
     rowCount: 24,
     createdAt: "2026-07-18 00:00:00",
   };
@@ -57,6 +59,8 @@ describe("session-source contract", () => {
       sessionId: "ses_1",
       name: "loans",
       kind: "csv",
+      origin: "upload",
+      relativePath: null,
       rowCount: 24,
       createdAt: "2026-07-18 00:00:00",
     });

@@ -1,11 +1,5 @@
-import { useEffect, useState } from "react";
-import {
-  createSession,
-  deleteSession,
-  listSessions,
-  renameSession,
-  type Session,
-} from "../lib/api";
+import { useState } from "react";
+import type { SessionSummary, SessionUiStatus } from "../store/sessionStore";
 
 /**
  * The session sidebar (TASKS V2.3, PRD FR1, ARCHITECTURE §4): the list of chat sessions with
@@ -22,6 +16,13 @@ export interface SidebarProps {
   activeSessionId: string | null;
   /** Report a selection change up to the shell (a new id, a switch, or null on delete). */
   onSelectSession: (sessionId: string | null) => void;
+  /** Central session index. It is updated by both REST mutations and global SSE events. */
+  sessions: SessionSummary[];
+  loading?: boolean;
+  loadError?: string | null;
+  onCreateSession: () => Promise<{ id: string }>;
+  onRenameSession: (sessionId: string, title: string) => Promise<unknown>;
+  onDeleteSession: (sessionId: string) => Promise<void>;
   /** Open the Settings → Connections panel (V5.3). Optional so the sidebar renders standalone. */
   onOpenSettings?: () => void;
 }
@@ -30,42 +31,57 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function Sidebar({ activeSessionId, onSelectSession, onOpenSettings }: SidebarProps) {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [loading, setLoading] = useState(true);
+function statusLabel(status: SessionUiStatus): string {
+  if (status === "working") return "Working";
+  if (status === "waiting_approval") return "Waiting for approval";
+  if (status === "retry") return "Retrying";
+  if (status === "error") return "Failed";
+  return "Idle";
+}
+
+function StatusDot({ status }: { status: SessionUiStatus }) {
+  const color =
+    status === "working"
+      ? "bg-indigo-500 animate-pulse"
+      : status === "waiting_approval"
+        ? "bg-amber-500 animate-pulse"
+        : status === "retry"
+          ? "bg-orange-500 animate-pulse"
+          : status === "error"
+            ? "bg-red-500"
+            : "bg-slate-300";
+  return (
+    <span
+      role="status"
+      aria-label={statusLabel(status)}
+      title={statusLabel(status)}
+      className={`h-2 w-2 shrink-0 rounded-full ${color}`}
+    />
+  );
+}
+
+export function Sidebar({
+  activeSessionId,
+  onSelectSession,
+  sessions,
+  loading = false,
+  loadError = null,
+  onCreateSession,
+  onRenameSession,
+  onDeleteSession,
+  onOpenSettings,
+}: SidebarProps) {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  useEffect(() => {
-    let active = true;
-    listSessions()
-      .then((next) => {
-        if (active) {
-          setSessions(next);
-          setError(null);
-        }
-      })
-      .catch((err: unknown) => {
-        if (active) setError(messageOf(err));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
   const handleCreate = async () => {
     setCreating(true);
     setError(null);
     try {
-      const session = await createSession();
-      // A new session is the most recent, so it goes to the top and becomes active.
-      setSessions((prev) => [session, ...prev]);
+      const session = await onCreateSession();
       onSelectSession(session.id);
     } catch (err) {
       setError(messageOf(err));
@@ -74,7 +90,7 @@ export function Sidebar({ activeSessionId, onSelectSession, onOpenSettings }: Si
     }
   };
 
-  const startRename = (session: Session) => {
+  const startRename = (session: SessionSummary) => {
     setEditingId(session.id);
     setDraftTitle(session.title);
     setConfirmDeleteId(null);
@@ -94,8 +110,7 @@ export function Sidebar({ activeSessionId, onSelectSession, onOpenSettings }: Si
     }
     setError(null);
     try {
-      const updated = await renameSession(id, title);
-      setSessions((prev) => prev.map((s) => (s.id === id ? updated : s)));
+      await onRenameSession(id, title);
       cancelRename();
     } catch (err) {
       setError(messageOf(err));
@@ -105,11 +120,12 @@ export function Sidebar({ activeSessionId, onSelectSession, onOpenSettings }: Si
   const handleDelete = async (id: string) => {
     setError(null);
     try {
-      await deleteSession(id);
-      setSessions((prev) => prev.filter((s) => s.id !== id));
+      await onDeleteSession(id);
       setConfirmDeleteId(null);
-      // The active session no longer exists — clear the selection so the shell shows nothing.
-      if (id === activeSessionId) onSelectSession(null);
+      // Keep the workspace useful after deleting the active session by selecting the next row.
+      if (id === activeSessionId) {
+        onSelectSession(sessions.find((session) => session.id !== id)?.id ?? null);
+      }
     } catch (err) {
       setError(messageOf(err));
     }
@@ -132,9 +148,9 @@ export function Sidebar({ activeSessionId, onSelectSession, onOpenSettings }: Si
         </button>
       </header>
 
-      {error && (
+      {(error || loadError) && (
         <p role="alert" className="border-b border-red-100 bg-red-50 px-4 py-2 text-xs text-red-600">
-          {error}
+          {error ?? loadError}
         </p>
       )}
 
@@ -195,13 +211,17 @@ export function Sidebar({ activeSessionId, onSelectSession, onOpenSettings }: Si
                 >
                   <button
                     type="button"
+                    aria-label={session.title}
                     aria-current={isActive ? "true" : undefined}
                     onClick={() => onSelectSession(session.id)}
                     className={`min-w-0 flex-1 truncate rounded px-2 py-1 text-left text-sm ${
                       isActive ? "font-medium text-indigo-900" : "text-slate-700"
                     }`}
                   >
-                    {session.title}
+                    <span className="flex min-w-0 items-center gap-2">
+                      <StatusDot status={session.status} />
+                      <span className="min-w-0 flex-1 truncate">{session.title}</span>
+                    </span>
                   </button>
                   {confirmDeleteId === session.id ? (
                     <>

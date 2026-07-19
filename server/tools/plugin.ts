@@ -305,7 +305,10 @@ export const DatastackToolsPlugin: Plugin = async () => {
           }
           const sources = ((body as { sources?: ListedSource[] })?.sources ?? []);
           if (sources.length === 0) {
-            return "No data sources are connected to this session yet. Upload a CSV to add one.";
+            return (
+              "No data sources are connected to this session yet. " +
+              "Upload files or connect a local folder from the chat composer."
+            );
           }
           const output = sources
             .map(
@@ -317,6 +320,65 @@ export const DatastackToolsPlugin: Plugin = async () => {
             title: `${sources.length} source${sources.length === 1 ? "" : "s"}`,
             output,
             metadata: { sources },
+          };
+        },
+      }),
+
+      list_workspace_files: tool({
+        description:
+          "List supported files in the local folder connected to this chat. Paths are relative " +
+          "to that folder; hidden, generated, credential, and secret files are excluded. Use " +
+          "read_workspace_file for SQL, YAML, JSON, Markdown, or text content. Read-only.",
+        args: {},
+        async execute(_args, context) {
+          const { ok, status, body } = await callBackend(
+            "/api/internal/tools/list_workspace_files",
+            { sessionID: context.sessionID },
+          );
+          if (!ok) return `Failed to list workspace files (status ${status}).`;
+          const payload = body as {
+            folder?: { name: string } | null;
+            files?: Array<{ path: string; kind: string; size: number; sourceName?: string }>;
+          };
+          if (!payload.folder) return "No local folder is connected to this session.";
+          const files = payload.files ?? [];
+          if (files.length === 0) return `Folder "${payload.folder.name}" has no supported files.`;
+          return {
+            title: `${files.length} workspace file${files.length === 1 ? "" : "s"}`,
+            output: files
+              .map((file) =>
+                `- ${file.path} (${file.kind}, ${file.size} bytes)` +
+                (file.sourceName ? ` — query source: ${file.sourceName}` : ""),
+              )
+              .join("\n"),
+            metadata: { workspace: { name: payload.folder.name, files } },
+          };
+        },
+      }),
+
+      read_workspace_file: tool({
+        description:
+          "Read a text-based file from this session. For a connected folder, pass the relative " +
+          "path from list_workspace_files. For an uploaded SQL/YAML/JSON/Markdown/text file, " +
+          "pass its safe source name from list_sources. Secret files and paths outside the " +
+          "connected folder are blocked. Read-only.",
+        args: {
+          path: z.string().describe("Relative workspace path or uploaded text-source name."),
+        },
+        async execute(args, context) {
+          const { ok, status, body } = await callBackend(
+            "/api/internal/tools/read_workspace_file",
+            { sessionID: context.sessionID, path: args.path },
+          );
+          if (!ok) {
+            const detail = (body as { error?: string })?.error;
+            return `Could not read "${args.path}" (status ${status})${detail ? `: ${detail}` : "."}`;
+          }
+          const result = body as { path: string; content: string };
+          return {
+            title: `Read ${result.path}`,
+            output: result.content,
+            metadata: { file: { path: result.path, bytes: result.content.length } },
           };
         },
       }),
@@ -343,7 +405,7 @@ export const DatastackToolsPlugin: Plugin = async () => {
             );
           }
           if (status === 422) {
-            return `Source "${args.source}" could not be read or profiled (it may not be valid CSV).`;
+            return `Source "${args.source}" could not be read or profiled (check that it is a queryable data file).`;
           }
           if (!ok) {
             return `Failed to profile "${args.source}" (status ${status}).`;
@@ -447,6 +509,36 @@ export const DatastackToolsPlugin: Plugin = async () => {
               : "DQ failed — publish blocked",
             output: formatDqResult(result),
             metadata: { dq: result },
+          };
+        },
+      }),
+
+      write_workspace_file: tool({
+        description:
+          "Create or replace a text-based data project file inside the folder connected to this " +
+          "session (SQL, YAML, JSON, Markdown, or text). Pass a relative path and complete new " +
+          "content. This WRITES the user's existing folder, so it always pauses for explicit " +
+          "approval showing the path and content. It cannot delete files or escape the folder.",
+        args: {
+          path: z.string().describe("Relative file path inside the connected folder."),
+          content: z.string().describe("Complete content to create or replace after approval."),
+        },
+        async execute(args, context) {
+          const { denied, ok, status, body } = await callWriteRoute(
+            "/api/internal/tools/write_workspace_file",
+            { sessionID: context.sessionID, path: args.path, content: args.content },
+          );
+          if (denied) return deniedMessage("write_workspace_file");
+          if (status === 404) return "No local folder is connected to this session.";
+          if (!ok) {
+            const detail = (body as { error?: string })?.error;
+            return `write_workspace_file failed${detail ? `: ${detail}` : ` (status ${status})`}.`;
+          }
+          const result = body as { path: string; bytes: number };
+          return {
+            title: `Updated ${result.path}`,
+            output: `Wrote ${result.bytes} bytes to ${result.path}.`,
+            metadata: { workspaceWrite: result },
           };
         },
       }),

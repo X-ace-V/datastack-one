@@ -10,6 +10,8 @@ import { createTranscriptPersister } from "./opencode/transcript.js";
 import { SessionManager } from "./opencode/sessions.js";
 import { testConnection } from "./connections/postgres.js";
 import { attachPostgres } from "./connections/attach.js";
+import { createSessionWarehouseRegistry } from "./store/session-warehouses.js";
+import { createLocalWorkspaceService } from "./workspace/local.js";
 
 /** Boot entrypoint: start the OpenCode runtime, then bind the HTTP server. */
 const PORT = Number(process.env.PORT ?? 3001);
@@ -19,6 +21,8 @@ async function main(): Promise<void> {
   // Open (and migrate) the metadata store so the project routes can persist to the
   // `platform` schema the moment HTTP starts accepting requests.
   const store = await openStore();
+  const sessionWarehouses = createSessionWarehouseRegistry();
+  const workspace = createLocalWorkspaceService();
   // Tell the agent-tools plugin (loaded into the OpenCode subprocess below) how to reach this
   // backend over loopback. The subprocess inherits this backend's env at spawn, so it must be
   // set BEFORE createDatastackOpencode. See server/tools/plugin.ts (ARCHITECTURE §3.4).
@@ -26,21 +30,30 @@ async function main(): Promise<void> {
   // Spawn the in-process OpenCode server first so its client is available to the
   // routes (e.g. `GET /api/models`) the moment HTTP starts accepting requests.
   const runtime = await createDatastackOpencode({ hostname: "127.0.0.1" });
-  // Capture permission requests into the approval gate (FR10). It is fed from the event
-  // bridge's single pump below, so the runtime's event stream is read exactly once.
+  // Session metadata is created before the event pump so OpenCode-native title updates can be
+  // mirrored into the durable sidebar index from the first event onward.
+  const sessions = new SessionManager(runtime.client, store);
+  // Capture permission requests into the approval gate (FR10). It is fed from the global event
+  // bridge's single cross-directory pump below, so every folder-rooted runtime is observed.
   const approvals = createApprovalGate(runtime.client);
   // Persist each assistant turn's blocks to `platform.messages` when the turn goes idle (V6.2),
   // so reopening a session reconstructs its full transcript. Fed off the same raw pump below.
   const transcript = createTranscriptPersister(store, {
     onError: (error) => console.error("transcript persist error:", error),
   });
-  // Pump the runtime's event stream once: raw events feed the permission gate and the transcript
+  // Pump the runtime's global event stream once: raw events feed the permission gate and transcript
   // persister, while the bridge fans normalized chat events (text/reasoning/tool/idle/error) to
   // its subscribers.
   const bridge = createEventBridge(runtime.client, {
     onRawEvent: (event) => {
       approvals.ingest(event);
       transcript.ingest(event);
+      if (event.type === "session.updated") {
+        const info = event.properties.info;
+        void sessions
+          .syncRuntimeTitle(info.id, info.title)
+          .catch((error) => console.error("session title sync error:", error));
+      }
     },
     onError: (error) => console.error("event bridge error:", error),
   });
@@ -56,13 +69,14 @@ async function main(): Promise<void> {
   const dqGate = createSessionDqGate();
   // Orchestrate chat sessions over the runtime + store (FR1) so the session routes can
   // create/list/get/rename/delete conversations.
-  const sessions = new SessionManager(runtime.client, store);
   const app = buildServer({
     opencode: runtime.client,
     approvals,
     toolApprovals,
     dqGate,
     store,
+    sessionWarehouses,
+    workspace,
     sessions,
     events,
     testConnection,
@@ -76,6 +90,7 @@ async function main(): Promise<void> {
     events.close();
     await bridge.close();
     runtime.close();
+    await sessionWarehouses.close();
     await store.close();
   });
 

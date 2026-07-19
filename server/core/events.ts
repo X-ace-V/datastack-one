@@ -54,6 +54,8 @@ export const NORMALIZED_EVENT_KINDS = [
   "error",
   "approval",
   "approval_resolved",
+  "session_updated",
+  "session_status",
 ] as const;
 export type NormalizedEventKind = (typeof NORMALIZED_EVENT_KINDS)[number];
 
@@ -180,6 +182,23 @@ export const ApprovalResolvedEventSchema = z.object({
 });
 export type ApprovalResolvedEvent = z.infer<typeof ApprovalResolvedEventSchema>;
 
+/** OpenCode changed a session title, including its native first-prompt title generation. */
+export const SessionUpdatedEventSchema = z.object({
+  ...baseFields,
+  kind: z.literal("session_updated"),
+  title: z.string().min(1),
+});
+export type SessionUpdatedEvent = z.infer<typeof SessionUpdatedEventSchema>;
+
+/** OpenCode's live execution status for a session, used by inactive sidebar rows. */
+export const SessionStatusEventSchema = z.object({
+  ...baseFields,
+  kind: z.literal("session_status"),
+  status: z.enum(["idle", "busy", "retry"]),
+  message: z.string().optional(),
+});
+export type SessionStatusEvent = z.infer<typeof SessionStatusEventSchema>;
+
 /**
  * The normalized chat event delivered over `GET /api/events` (FR3). A discriminated union
  * on `kind` so the browser store can switch on it exhaustively, and every member carries a
@@ -193,6 +212,8 @@ export const NormalizedEventSchema = z.discriminatedUnion("kind", [
   ErrorEventSchema,
   ApprovalEventSchema,
   ApprovalResolvedEventSchema,
+  SessionUpdatedEventSchema,
+  SessionStatusEventSchema,
 ]);
 export type NormalizedEvent = z.infer<typeof NormalizedEventSchema>;
 

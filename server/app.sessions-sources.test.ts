@@ -17,7 +17,7 @@ import { SessionSourceViewSchema } from "./core/session-sources.js";
  * loopback routes. The response withholds the on-disk `path` (FR5b). Negative paths (503, 400,
  * 404) use `app.inject`.
  */
-describe("session CSV source upload route", () => {
+describe("session file source upload route", () => {
   const open: WarehouseStore[] = [];
   const tmpDirs: string[] = [];
 
@@ -138,17 +138,34 @@ describe("session CSV source upload route", () => {
     }
   });
 
-  it("rejects a non-CSV file with 400", async () => {
+  it("rejects an unsupported file type with 400", async () => {
     const { app, sessionId } = await fixtures();
     const address = await app.listen({ port: 0, host: "127.0.0.1" });
     try {
       const form = new FormData();
-      form.append("file", new Blob(["nope"], { type: "text/plain" }), "notes.txt");
+      form.append("file", new Blob(["nope"], { type: "application/octet-stream" }), "notes.exe");
       const res = await fetch(`${address}/api/sessions/${sessionId}/sources`, {
         method: "POST",
         body: form,
       });
       expect(res.status).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects credential-bearing project files even when their extension is supported", async () => {
+    const { app, sessionId } = await fixtures();
+    const address = await app.listen({ port: 0, host: "127.0.0.1" });
+    try {
+      const form = new FormData();
+      form.append("file", new Blob(["password: secret"], { type: "text/yaml" }), "profiles.yml");
+      const res = await fetch(`${address}/api/sessions/${sessionId}/sources`, {
+        method: "POST",
+        body: form,
+      });
+      expect(res.status).toBe(400);
+      expect(await res.text()).not.toContain("secret");
     } finally {
       await app.close();
     }

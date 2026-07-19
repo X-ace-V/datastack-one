@@ -33,6 +33,8 @@ const CHANNELS = [
   "error",
   "approval",
   "approval_resolved",
+  "session_updated",
+  "session_status",
 ] as const satisfies readonly NormalizedEvent["kind"][];
 
 // Compile-time completeness: fails to typecheck if a NormalizedEvent kind is not in CHANNELS.

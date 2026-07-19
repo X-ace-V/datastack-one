@@ -68,4 +68,76 @@ describe("Composer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
+
+  it("sends a file-only turn with its session source reference", () => {
+    const onSend = vi.fn();
+    const file = new File(["id\n1\n"], "loans.csv", { type: "text/csv" });
+    render(
+      <Composer
+        isWorking={false}
+        onSend={onSend}
+        onCancel={() => {}}
+        attachments={[
+          {
+            id: "a1",
+            file,
+            name: file.name,
+            size: file.size,
+            status: "ready",
+            source: {
+              sessionId: "ses_1",
+              name: "loans",
+              kind: "csv",
+              origin: "upload",
+              relativePath: null,
+              rowCount: 1,
+              createdAt: "2026-07-19",
+            },
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(onSend).toHaveBeenCalledWith("", [{ name: "loans", kind: "csv" }]);
+  });
+
+  it("waits for every selected file upload before enabling send", () => {
+    const file = new File(["select 1"], "query.sql", { type: "text/plain" });
+    render(
+      <Composer
+        isWorking={false}
+        value="inspect this"
+        onSend={() => {}}
+        onCancel={() => {}}
+        attachments={[
+          { id: "a1", file, name: file.name, size: file.size, status: "uploading" },
+        ]}
+      />,
+    );
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Uploading…")).toBeTruthy();
+  });
+
+  it("shows the immutable workspace root and keeps refresh inside the composer", () => {
+    const refresh = vi.fn();
+    render(
+      <Composer
+        isWorking={false}
+        onSend={() => {}}
+        onCancel={() => {}}
+        folder={{
+          sessionId: "ses_1",
+          name: "warehouse-project",
+          path: "/allowed/warehouse-project",
+          workspaceRoot: true,
+          connectedAt: "2026-07-19",
+        }}
+        onRefreshFolder={refresh}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh warehouse-project" }));
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Disconnect warehouse-project" })).toBeNull();
+  });
 });

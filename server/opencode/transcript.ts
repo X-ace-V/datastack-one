@@ -14,7 +14,8 @@ import { normalizeEvent } from "./bridge.js";
  * Transcript persister (TASKS V6.2, PRD FR1). The chat turn (V1.3) persists the user's prompt,
  * but the assistant's reply — its streamed text, reasoning, and tool cards — only ever lived in
  * the browser's live-state store, so a restart or a fresh browser reopened a session with half
- * its history. This closes that gap: fed every raw event off the bridge's single pump (alongside
+ * its history. This closes that gap: fed every raw event off the bridge's global cross-directory
+ * pump (alongside
  * the approval gate), it accumulates each assistant turn's blocks and, when the turn goes idle,
  * writes them to `platform.messages` so `GET /api/sessions/:id` (V1.2) can reconstruct the whole
  * transcript on reopen. See ARCHITECTURE §3.1/§6.

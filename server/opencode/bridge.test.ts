@@ -16,7 +16,7 @@ import { NormalizedEventSchema } from "../core/events.js";
  * clean shutdown. See LOOP.md §5 — assert values and invariants, not just "it ran".
  */
 
-/** A controllable async event stream: push events, then end, mimicking `event.subscribe`. */
+/** A controllable raw-event stream wrapped by the mock as OpenCode global events. */
 function makeEventStream() {
   const queue: Event[] = [];
   let wake: (() => void) | null = null;
@@ -48,10 +48,15 @@ function makeEventStream() {
   };
 }
 
-/** Build an `EventClient` whose `event.subscribe()` returns the given stream. */
+/** Build an `EventClient` whose cross-directory `global.event()` wraps the given stream. */
 function mockClient(stream: AsyncGenerator<Event>): EventClient {
+  async function* globalStream() {
+    for await (const payload of stream) {
+      yield { directory: "/workspace", payload };
+    }
+  }
   return {
-    event: { subscribe: async () => ({ stream }) },
+    global: { event: async () => ({ stream: globalStream() }) },
   } as unknown as EventClient;
 }
 
@@ -313,11 +318,30 @@ describe("normalizeEvent", () => {
     });
   });
 
-  it("drops non-chat event types (status/message/file are not chat stream)", () => {
+  it("drops unsupported or malformed non-chat event types", () => {
     for (const type of ["session.status", "message.updated", "server.connected", "file.watcher.updated"]) {
       const event = { type, properties: { sessionID: "ses_1" } } as unknown as Event;
       expect(normalizeEvent(event)).toBeNull();
     }
+  });
+
+  it("maps OpenCode-native title and background status updates", () => {
+    expect(normalizeEvent({
+      type: "session.updated",
+      properties: { info: { id: "ses_1", title: "Profile loan defaults" } },
+    } as unknown as Event)).toEqual({
+      kind: "session_updated",
+      sessionID: "ses_1",
+      title: "Profile loan defaults",
+    });
+    expect(normalizeEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_1", status: { type: "busy" } },
+    } as unknown as Event)).toEqual({
+      kind: "session_status",
+      sessionID: "ses_1",
+      status: "busy",
+    });
   });
 
   it("produces schema-valid events for every relayed kind", () => {
@@ -340,6 +364,14 @@ describe("normalizeEvent", () => {
       } as unknown as Event,
       askedEvent("perm_1", "s"),
       repliedEvent("perm_1", "s", "once"),
+      {
+        type: "session.updated",
+        properties: { info: { id: "s", title: "Native title" } },
+      } as unknown as Event,
+      {
+        type: "session.status",
+        properties: { sessionID: "s", status: { type: "busy" } },
+      } as unknown as Event,
     ];
     for (const event of cases) {
       const normalized = normalizeEvent(event);

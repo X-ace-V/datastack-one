@@ -114,6 +114,7 @@ export function planPublishServing(input: PublishServingInput): PublishPlan {
 export async function publishServing(
   store: WarehouseStore,
   input: PublishServingInput,
+  registryStore: WarehouseStore = store,
 ): Promise<ServedTable> {
   const format = input.format ?? DEFAULT_SERVING_FORMAT;
   if (!isServingFormat(format)) {
@@ -150,7 +151,7 @@ export async function publishServing(
   }
 
   // Register the endpoint last: nothing is served until its export is verified on disk.
-  return await registerServedTable(store, {
+  return await registerServedTable(registryStore, {
     name: plan.name,
     projectId: input.projectId,
     runId: input.runId ?? null,
