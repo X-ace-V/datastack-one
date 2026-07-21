@@ -1,208 +1,172 @@
 # DataStack One
 
-**Vercel for internal data platforms.** Connect a data source, say what you want in plain
-English, and an agent does the data-engineering work — profiling, SQL, quality checks,
-serving — with a human approval gate in front of every write.
+### A conversational data-engineering workspace with human approval built in
 
-This repo is the **local-first MVP**: a localhost web app where you talk to the agent in a
-chat session, and it calls real tools against real DuckDB, real Parquet, and a real
-read-only Postgres attach. No mocked demo path.
+[![Node.js 20+](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=111827)](https://react.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-8B5CF6.svg)](./LICENSE)
 
-> **Conversational agent.** The first version of this app was a six-step button wizard driven
-> by a deterministic runner. The engine was right; the shell was not — DataStack One is a
-> conversational, session-based agent, so the wizard pages and the runner were removed and the
-> chat shell replaced them. You now open a session, attach files in the composer, connect an
-> existing local data-project folder, or attach a Postgres, and ask
-> in plain English; an embedded [OpenCode](https://opencode.ai) agent plans and calls the data
-> tools live, streaming every step into the chat and pausing inline for your approval before
-> any write. See [`PRD.md`](./PRD.md) for the contract and [`DEMO.md`](./DEMO.md) for a
-> walkthrough.
+**DataStack One is “Vercel for internal data platforms.”** Connect files, an existing data
+project, or a read-only Postgres database; describe the outcome in plain English; and let the
+agent profile, query, transform, validate, and publish the data. Every write pauses for human
+approval with the exact action visible before it runs.
 
----
+Built for the **OpenAI Build Week — Work and Productivity** track using **Codex**.
 
-## Quickstart
+## Demo
 
-**Prerequisites:** Node **≥20**. Nothing else — DuckDB is embedded, and the default model
-(`opencode/big-pickle`) is free and needs no API key.
+https://github.com/user-attachments/assets/ac9ba0cc-318c-4e57-ac0e-484e22fcbe9f
+
+[Open the demo video](https://github.com/user-attachments/assets/ac9ba0cc-318c-4e57-ac0e-484e22fcbe9f) ·
+[Follow the reproducible walkthrough](./DEMO.md)
+
+## What it does
+
+- **Natural-language data work:** ask the agent to profile, query, clean, transform, test, or
+  publish data.
+- **Real project folders:** start a session from an existing folder and use it as the agent's
+  actual working directory.
+- **Independent parallel sessions:** each chat owns its history, files, folder, DuckDB warehouse,
+  model, approvals, and execution state. Switching chats never stops background work.
+- **Files and databases:** upload multiple files or register Postgres/Neon in Settings and attach
+  it read-only by name.
+- **Visible agent activity:** Markdown responses, reasoning, tool calls, results, questions, and
+  approvals stream into the conversation.
+- **Human control:** file writes, database attachment, transforms, warehouse loads, and publishing
+  require one-time inline approval.
+- **Useful outputs:** inspect query results in the contextual data panel and publish approved,
+  DQ-checked snapshots as JSON and CSV endpoints.
+
+## How it works
+
+```mermaid
+flowchart LR
+    U["Engineer"] -->|"Plain-English request"| UI["React chat workspace"]
+    UI <-->|"REST + replayable SSE"| API["Fastify backend"]
+    API <-->|"Sessions + events"| AGENT["OpenCode agent runtime"]
+    AGENT --> TOOLS["Audited data tools"]
+    TOOLS -->|"Read"| DATA["Session DuckDB + read-only Postgres"]
+    TOOLS -->|"Write"| APPROVAL["Inline approval"]
+    APPROVAL -->|"Allow once"| DATA
+    DATA --> UI
+```
+
+The interface has three focused areas: independent sessions on the left, conversation in the
+center, and an output-only data panel that appears when there is something useful to show.
+
+## Setup and run
+
+### Requirements
+
+- Node.js **20 or newer**
+- npm
+- macOS, Linux, or Windows
+
+DuckDB is embedded, so no database or external service is required for the main demo.
 
 ```bash
-npm install          # installs deps, incl. the `opencode` agent binary
-npm run dev          # backend on :3001, web app on :5173
+git clone https://github.com/X-ace-V/datastack-one.git
+cd datastack-one
+npm ci
+npm run dev
 ```
 
-Open **<http://localhost:5173>** — a three-pane shell: the **session sidebar** (left), the
-**chat stream** (center), and the output-only **data panel** (right). Create a session, use the
-composer's **+** menu to upload one or more files or **start a new session from an existing
-folder**, and ask a question. A folder selection becomes that OpenCode session's real working
-directory—the same semantics as starting Claude Code or Codex in a project—not a read-only
-attachment to the app repository. The agent's reasoning, tool calls, inline approvals, and query
-results stream in live. Each chat has its own draft, attachments, working folder, execution warehouse, title, and background
-status, so switching chats does not stop or mix their work. The backend is real too:
+Open **<http://localhost:5173>**. The backend runs at **<http://localhost:3001>**.
 
 ```bash
-curl localhost:3001/api/health          # {"status":"ok","service":"datastack-one",...}
-curl localhost:3001/api/models          # the live model catalog
+curl http://localhost:3001/api/health
 ```
 
-See [`DEMO.md`](./DEMO.md) for the end-to-end walkthrough (upload → ask → build → publish →
-serve), including how to attach a live Postgres.
+Stop both processes with **Ctrl+C** in the terminal running `npm run dev`.
 
-### Scripts
+### Try the main flow
 
-| Script | What it does |
-|--------|--------------|
-| `npm run dev` | Backend + web together (the normal way to run it). |
-| `npm run dev:server` | Fastify + the embedded OpenCode runtime on `:3001`. |
-| `npm run dev:web` | Vite dev server on `:5173`, proxying `/api` to `:3001`. |
-| `npm test` | The full vitest suite. |
-| `npm run typecheck` | `tsc --noEmit` over both the server and web projects. |
+1. Create a session.
+2. Use **Add** in the composer to upload `fixtures/loans_sample.csv` and `fixtures/rules.txt`, or
+   start a session from an existing folder.
+3. Ask: *“Profile this and show total balance by branch.”*
+4. Ask: *“Clean it using the rules and publish a daily branch summary.”*
+5. Review each proposed write and choose **Allow** or **Deny**.
+6. Open the generated JSON endpoint or download its CSV snapshot.
 
----
+For the full CSV and Postgres flow, use [`DEMO.md`](./DEMO.md).
 
-## What actually runs
+### Optional local-folder restriction
 
-The **data tools** are the agent's only way to touch data — a fixed, audited capability set it
-calls conversationally. They live in one `@opencode-ai/plugin`
-(`server/tools/plugin.ts`) that OpenCode loads; each `execute()` reaches DuckDB over a loopback
-route (`/api/internal/tools/*`) so a credential or on-disk path never crosses into the model's
-runtime. The agent chooses the *order*; the tool set fixes the *capabilities*. Every tool that
-writes or executes is approval-gated.
-
-| Tool | Approval | What it does |
-|------|----------|--------------|
-| `list_sources` | — | The session's connected sources, by name + schema — never a path or URL. |
-| `profile_source` | — | DuckDB profiling over a queryable file source: schema, types, rows, null %, candidate keys, date columns. |
-| `run_query` | — | A read-only `SELECT` over DuckDB (+ any attached Postgres); returns rows to the data panel. |
-| `list_workspace_files` | — | Lists supported files in the folder connected to this chat, using relative paths only. |
-| `read_workspace_file` | — | Reads a supported text project file or uploaded text attachment without exposing its absolute path. |
-| `write_workspace_file` | **ask** | Creates or replaces a supported text project file in the connected folder after inline approval. |
-| `attach_source` | **ask** | ATTACH a registered Postgres by **name**, read-only; the backend resolves name→URL — the tool never sees the secret. |
-| `land_parquet` | **ask** | `COPY … TO … (FORMAT PARQUET)` into `data/landing/`, partitioned by ingestion date. |
-| `load_warehouse` | **ask** | Parquet → `raw.source`, reporting the row count loaded. |
-| `run_transform` | **ask** | Executes the reviewed SQL verbatim into `marts.<table>`. |
-| `run_dq_check` | — | Runs data-quality checks; a failing run blocks a later publish for the session. |
-| `publish_serving` | **ask** | Exports the CSV snapshot and registers the REST endpoint. |
-
-**The approval gate is the point.** Each write pauses the turn with an inline Allow/Deny that
-shows the exact SQL/DDL first; nothing writes or attaches without an explicit human decision.
-OpenCode does not gate custom plugin tools, so the gate is enforced backend-side: the write's
-loopback route opens a pending approval and awaits `POST /api/approvals/:requestID` before it
-executes.
-
-**The served endpoints read the published CSV snapshot**, not the live `marts` table, so a
-later run whose checks failed cannot leak un-published rows to REST callers.
-
-### Models
-
-Model-agnostic through OpenCode's router. The default is the free **`opencode/big-pickle`**.
-Paid models appear only if a provider key (e.g. `ANTHROPIC_API_KEY`) is in the environment at
-boot — OpenCode discovers providers from env keys, so a paid model either genuinely exists in
-the catalog or is honestly absent.
-
----
-
-## HTTP API
-
-The full conversational surface: sessions, the chat turn, the SSE event stream, sources,
-connections, approvals, the served endpoints, and the model catalog.
-
-| Route | Purpose |
-|-------|---------|
-| `GET /api/health` | Liveness. |
-| `GET /api/models` | Live provider/model catalog (FR13). |
-| `POST /api/sessions` · `GET /api/sessions` | Create / list chat sessions (FR1). Create accepts optional `folderPath`; OpenCode starts with that authorized folder as its immutable cwd. |
-| `GET /api/sessions/status` | OpenCode's live status map for recovering background-running chats. |
-| `GET /api/sessions/:id` | A session with its message history (FR1). |
-| `GET /api/sessions/:id/lineage` | A session's audit trail: write tool calls, approvals, DQ results (FR12). |
-| `PATCH /api/sessions/:id` · `DELETE /api/sessions/:id` | Rename / delete a session (FR1). |
-| `POST /api/sessions/:id/chat` · `POST /api/sessions/:id/cancel` | Send an NL turn / cancel the in-flight turn (FR2). |
-| `POST /api/sessions/:id/sources` · `GET /api/sessions/:id/sources` | Upload/list session-owned CSV, TSV, JSON/JSONL, Parquet, SQL, YAML, Markdown, or text files; queryable files are validated in DuckDB (FR4). |
-| `GET /api/folders` | Browse only server-approved local folders for the composer folder picker. |
-| `GET /api/sessions/:id/folder` | Read the session's immutable workspace root and indexed files. |
-| `POST /api/sessions/:id/folder` · `DELETE /api/sessions/:id/folder` | Compatibility guards: return `409` because an existing OpenCode session cannot change or remove its cwd; create another session with `folderPath`. |
-| `POST /api/sessions/:id/folder/refresh` | Rescan the connected folder and refresh its session-owned source index. |
-| `GET /api/events` | SSE chat stream: per-session routing + `?lastSeq` replay (FR3). |
-| `POST /api/connections` · `GET /api/connections` | Register / list database connections by name; the URL is entered only here and the list never returns a secret (FR5). |
-| `DELETE /api/connections/:name` | Remove a registered connection (FR5). |
-| `POST /api/connections/:name/test` | Probe a registered connection read-only; returns `{ok, error}` with the credential scrubbed (FR5). |
-| `POST /api/projects` · `GET /api/projects` | Create / list projects. |
-| `POST /api/projects/:id/source` · `GET /api/projects/:id/sources` | Upload / list CSV sources (FR4). |
-| `POST /api/projects/:id/profile` | Profile a source (FR6). |
-| `POST /api/projects/:id/rules` · `GET /api/projects/:id/rules` | Save (file or textarea) / read a rules doc. |
-| `GET /api/projects/:id/artifacts` | Latest artifact per kind. |
-| `POST /api/approvals/:requestID` | Answer an OpenCode permission request (FR10). |
-| `GET /api/projects/:id/served` | Endpoints this project has published. |
-| `GET /api/serve/:name` · `GET /api/serve/:name.csv` | The generated endpoint: JSON preview / CSV download (FR11). |
-| `POST /api/internal/tools/list_sources` · `POST /api/internal/tools/profile_source` · `POST /api/internal/tools/run_query` | Loopback the agent's read data-tools call; session-scoped, name-only (FR4/FR6/FR7). |
-| `POST /api/internal/tools/list_workspace_files` · `POST /api/internal/tools/read_workspace_file` | Loopback for relative-path-only connected-folder listing and bounded text reads. |
-| `POST /api/internal/tools/write_workspace_file` | Loopback for approval-gated create/replace inside the connected folder; traversal and secret filenames are rejected. |
-| `POST /api/internal/tools/run_dq_check` | Loopback for the read-only DQ tool; runs the reviewed checks and a failing run blocks a later publish for the session (FR9). |
-| `POST /api/internal/tools/land_parquet` · `POST /api/internal/tools/load_warehouse` · `POST /api/internal/tools/run_transform` · `POST /api/internal/tools/publish_serving` | Loopback for the four approval-gated write tools; executed only after inline approval (FR8). |
-| `POST /api/internal/tools/attach_source` | Loopback for the ask-gated attach tool; resolves a connection name→URL and ATTACHes it read-only after inline approval — the URL never reaches the model (FR5b). |
-
-The `internal/tools/*` routes are the loopback the in-process OpenCode plugin
-(`server/tools/plugin.ts`) calls — the agent's tools run in a separate runtime with no
-direct store access, so they reach the store through these. They take a session id and a
-source **name** and never a raw path or credential (FR5b). The write routes
-(`land_parquet`/`load_warehouse`/`run_transform`/`publish_serving`/`attach_source`/
-`write_workspace_file`) each
-pause on an inline human approval before executing, so nothing is written or attached
-unapproved (FR8/FR10).
-
----
-
-## Layout
-
-```
-server/
-  core/        pure domain logic — no fs, no net, no process (schemas, SQL builders, parsing)
-  store/       DuckDB: control metadata + a lazy isolated execution warehouse per chat
-  tools/       the data-engineering tools (profile, land, warehouse, transform, dq, serve)
-  opencode/    the embedded agent runtime: client, model catalog, event bridge, permissions
-  serving/     the dynamic served-table reader
-  app.ts       the Fastify server (routes + status mapping); index.ts wires the real deps
-web/src/       React 19 + Vite + Tailwind v4 — the chat shell (sidebar · chat stream · data panel)
-fixtures/      synthetic lending CSV + the plain-English rules doc (committed)
-tests/         cross-cutting suites
-data/          control DB, per-session warehouses, landing, uploads, artifacts, serving (gitignored)
-```
-
-`server/core` is pure and imported by everything else; nothing in `core` imports back out.
-Relative imports in server code end in `.js` (ESM NodeNext) even from `.ts`; `web/` uses its
-own tsconfig and extensionless imports.
-
-## Tests
+The folder picker defaults to the user's home directory. Restrict it to dedicated project roots
+with `DATASTACK_FOLDER_ROOTS` (`:` separated on macOS/Linux and `;` on Windows):
 
 ```bash
-npm test                 # full suite
-npm run typecheck        # both projects
+DATASTACK_FOLDER_ROOTS=/path/to/data-projects npm run dev
 ```
 
-**Fixtures are synthetic and load-bearing.** `fixtures/loans_sample.csv` is built so every
-rule in `fixtures/rules.txt` is real work: `loan_amount` is thousands-separated *text* so
-"convert to numeric" cannot be a no-op, and 24 rows hold 22 customers so "remove duplicate
-customers" is genuinely ambiguous. Never point this pipeline at real data — and never through
-a free model.
+## Safety by design
 
----
+- All mutating tools are approval-gated; there is no “always allow” path.
+- Postgres is attached read-only, and credentials entered in Settings stay server-side.
+- The agent receives connection names and schemas, never database URLs or passwords.
+- Connected folders use canonical containment checks and reject traversal, symlinks, hidden
+  files, generated directories, and common credential files.
+- Every session has a private DuckDB catalog, so equal table or report names cannot collide.
+- Published endpoints read the approved snapshot that passed DQ, not a later mutable table.
 
-## Documents
+## Testing
 
-| Doc | What it is |
-|-----|------------|
-| [`PRD_DataStack_One.md`](./PRD_DataStack_One.md) | Product vision — north star, personas, long-term scope. |
-| [`PRD.md`](./PRD.md) | Engineering build contract — MVP scope, FRs, standards, acceptance. |
-| [`ARCHITECTURE.md`](./ARCHITECTURE.md) | System design — processes, folders, tools, data/approval/event flows. |
-| [`AGENTS.md`](./AGENTS.md) | Agent rules + the accumulated lessons of the build. |
-| [`DEMO.md`](./DEMO.md) | End-to-end walkthrough + live-Postgres (Neon) setup. |
+```bash
+npm test
+npm run typecheck
+```
 
-## Status
+The repository has more than 1,000 automated tests across domain logic, HTTP routes, OpenCode
+events, session isolation, approval and question flows, tools, DuckDB behavior, and React UI. The
+committed fixtures are synthetic, and the acceptance suite exercises the real local data path
+without consuming model credits.
 
-**MVP complete.** The conversational shell is live end to end: create several independent
-sessions, attach multiple files or start a folder-rooted session from the composer, switch between
-background-running chats, and let the agent profile, query, edit approved project files, and —
-with an inline approval on every write — build and publish a served report. Session titles come
-from OpenCode's native title generator and update live in the sidebar. The PRD §5 acceptance
-criteria are asserted by `tests/acceptance.test.ts`, which replays a captured free-model
-(`opencode/big-pickle`) run against the real DuckDB path. The v1 wizard that proved the engine
-was removed; a form was the wrong interface for this product.
+## How Codex helped
+
+Codex was the engineering partner throughout the build. It helped research OpenCode's SDK and
+live event behavior, design the multi-session architecture, implement the backend and React
+workspace, reproduce runtime failures, and turn each fix into regression coverage.
+
+The developer remained responsible for the important product decisions: replacing the original
+wizard with conversation, making connected folders the agent's real working directory, isolating
+parallel sessions, keeping credentials away from the model, requiring approval for every write,
+and shaping the final UX. Codex accelerated implementation and verification; the developer chose
+the direction and reviewed the result.
+
+## Repository guide
+
+```text
+server/       Fastify API, OpenCode integration, DuckDB stores, tools, and workspace security
+web/src/      React chat workspace, live session state, SSE client, and contextual data panel
+fixtures/     Synthetic CSV, rules, and Postgres seed data
+tests/        Integration and acceptance suites
+data/         Local metadata, uploads, warehouses, and outputs (gitignored)
+```
+
+- [`DEMO.md`](./DEMO.md) — complete judge walkthrough
+- [`PRD.md`](./PRD.md) — product requirements and acceptance contract
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — system design and trust boundaries
+- [`API.md`](./API.md) — REST, SSE, and internal tool routes
+- [`AGENTS.md`](./AGENTS.md) — engineering rules and lessons from the build
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Start backend and web together. |
+| `npm run dev:server` | Start Fastify and OpenCode on `:3001`. |
+| `npm run dev:web` | Start Vite on `:5173`. |
+| `npm test` | Run the complete Vitest suite. |
+| `npm run typecheck` | Run strict TypeScript checks. |
+
+## License
+
+Released under the [MIT License](./LICENSE).
+
+## Prototype status
+
+DataStack One is a **two-day hackathon prototype**, so a few quirks are expected. The foundation
+is working and well tested; the next step is to harden the product, expand its integrations, and
+take it to production quality with further **GPT-5.6-powered development**.

@@ -48,7 +48,7 @@ function inlineCodeSpans(markdown: string): string[] {
   return [...stripFencedCode(markdown).matchAll(/`([^`\n]+)`/g)].map((m) => group(m, 1));
 }
 
-const DOCS = ["README.md"] as const;
+const DOCS = ["README.md", "API.md"] as const;
 const docText = Object.fromEntries(DOCS.map((name) => [name, readDoc(name)])) as Record<
   (typeof DOCS)[number],
   string
