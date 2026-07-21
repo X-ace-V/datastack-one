@@ -21,6 +21,14 @@ const SESSIONS: SessionSummary[] = [
     updatedAt: "2026-07-16T09:00:00Z",
     status: "waiting_approval",
   },
+  {
+    id: "ses_3",
+    title: "Warehouse setup",
+    model: null,
+    createdAt: "2026-07-16T09:00:00Z",
+    updatedAt: "2026-07-16T09:00:00Z",
+    status: "waiting_input",
+  },
 ];
 
 function props(overrides: Partial<SidebarProps> = {}): SidebarProps {
@@ -44,6 +52,7 @@ describe("Sidebar", () => {
     expect(screen.getByText("Branch report")).toBeTruthy();
     expect(screen.getByLabelText("Working")).toBeTruthy();
     expect(screen.getByLabelText("Waiting for approval")).toBeTruthy();
+    expect(screen.getByLabelText("Waiting for input")).toBeTruthy();
   });
 
   it("renders loading, empty, and load-error states honestly", () => {

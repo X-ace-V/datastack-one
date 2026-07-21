@@ -59,7 +59,7 @@ export interface ApprovalGate {
    * Feed one raw runtime event. A `permission.asked` is captured/updated in the queue;
    * a `permission.replied` (answered here or elsewhere) drops it. Other events are ignored.
    */
-  ingest(event: Event): void;
+  ingest(event: Event, directory?: string): void;
   /** All still-pending requests, oldest first, for the UI/SSE to render. */
   pending(): ApprovalRequest[];
   /** The pending request for `requestID`, or `undefined` if none is queued. */
@@ -79,16 +79,16 @@ export interface ApprovalGate {
  */
 export function createApprovalGate(client: PermissionClient): ApprovalGate {
   // requestID → pending request. Insertion order is preserved, so pending() is oldest-first.
-  const queue = new Map<string, ApprovalRequest>();
+  const queue = new Map<string, { request: ApprovalRequest; directory?: string }>();
 
   return {
-    ingest(event) {
+    ingest(event, directory) {
       // The live runtime emits event types outside the v1 `Event` union, so match on the raw
       // type string and read the v2 properties via the verified shapes (see the module doc).
       const raw = event as unknown as { type: string; properties: unknown };
       if (raw.type === "permission.asked") {
         const request = toApprovalRequest(raw.properties as PermissionAskedProperties);
-        queue.set(request.requestID, request);
+        queue.set(request.requestID, { request, directory });
         return;
       }
       if (raw.type === "permission.replied") {
@@ -98,20 +98,22 @@ export function createApprovalGate(client: PermissionClient): ApprovalGate {
     },
 
     pending() {
-      return [...queue.values()];
+      return [...queue.values()].map((entry) => entry.request);
     },
 
     get(requestID) {
-      return queue.get(requestID);
+      return queue.get(requestID)?.request;
     },
 
     async reply(requestID, action) {
-      const request = queue.get(requestID);
-      if (!request) throw new UnknownApprovalError(requestID);
+      const pending = queue.get(requestID);
+      if (!pending) throw new UnknownApprovalError(requestID);
+      const { request, directory } = pending;
 
       const res = await client.postSessionIdPermissionsPermissionId({
         path: { id: request.sessionID, permissionID: requestID },
         body: { response: ACTION_TO_RESPONSE[action] },
+        ...(directory ? { query: { directory } } : {}),
       });
       if (res.error) {
         // Keep the request pending so a transient runtime failure can be retried.

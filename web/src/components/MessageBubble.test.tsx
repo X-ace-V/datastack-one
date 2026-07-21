@@ -84,4 +84,23 @@ describe("MessageBubble", () => {
     expect(wrapper!.querySelector('[data-role="approval"]')).toBeTruthy();
     expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
   });
+
+  it("renders an assistant turn holding only a pending question", () => {
+    const message: AssistantMessage = {
+      role: "assistant",
+      id: "a4",
+      blocks: [{
+        kind: "question",
+        requestID: "question_1",
+        status: "pending",
+        questions: [{
+          header: "Warehouse",
+          question: "Which warehouse?",
+          options: [{ label: "DuckDB", description: "Local" }],
+        }],
+      }],
+    };
+    const { container } = render(<MessageBubble message={message} />);
+    expect(container.querySelector('[data-role="question"]')).toBeTruthy();
+  });
 });

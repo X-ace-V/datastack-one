@@ -283,6 +283,87 @@ describe("reduce — inline approvals (FR10)", () => {
   });
 });
 
+describe("reduce — interactive questions", () => {
+  const question: NormalizedEvent = {
+    kind: "question",
+    sessionID: SID,
+    requestID: "question_1",
+    messageID: "m1",
+    callID: "call_1",
+    questions: [{
+      header: "Warehouse",
+      question: "Which warehouse?",
+      options: [{ label: "DuckDB", description: "Local" }],
+    }],
+  };
+
+  it("attaches the controls to the owning tool turn and tracks pending input", () => {
+    const state = run([
+      ev({
+        kind: "tool",
+        sessionID: SID,
+        messageID: "m1",
+        partID: "part_1",
+        callID: "call_1",
+        tool: "question",
+        status: "running",
+      }),
+      ev(question),
+    ]);
+    expect(assistant(state).id).toBe("m1");
+    expect(assistant(state).blocks.find((candidate) => candidate.kind === "question"))
+      .toMatchObject({ requestID: "question_1", status: "pending" });
+    expect(state.pendingQuestions).toHaveLength(1);
+    expect(state.isWorking).toBe(true);
+  });
+
+  it("is idempotent on recovery and records the terminal answer", () => {
+    const state = run([
+      ev(question),
+      ev(question),
+      ev({
+        kind: "question_resolved",
+        sessionID: SID,
+        requestID: "question_1",
+        status: "answered",
+        answers: [["DuckDB"]],
+      }),
+    ]);
+    expect(state.pendingQuestions).toEqual([]);
+    const blocks = assistant(state).blocks.filter((candidate) => candidate.kind === "question");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ status: "answered", answers: [["DuckDB"]] });
+  });
+
+  it("keeps background sessions independent and marks them waiting for input", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => ({
+      ok: true,
+      json: async () => input === "/api/sessions/status"
+        ? { statuses: {} }
+        : { sessions: [{
+            id: SID,
+            title: "Warehouse setup",
+            model: null,
+            createdAt: "2026-07-20",
+            updatedAt: "2026-07-20",
+          }] },
+    })));
+    try {
+      const { result } = renderHook(() => useSessionStore());
+      await act(async () => result.current.loadSessions());
+      act(() => {
+        result.current.setActiveSession("another_session");
+        result.current.handleEvent(question);
+      });
+      expect(result.current.activeSessionId).toBe("another_session");
+      expect(result.current.sessions[0]?.status).toBe("waiting_input");
+      expect(result.current.getState(SID)?.pendingQuestions).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("reduce — turn lifecycle", () => {
   it("idle ends the turn and clears echo bookkeeping", () => {
     const s = run([

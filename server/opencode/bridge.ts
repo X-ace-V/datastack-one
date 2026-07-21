@@ -4,6 +4,12 @@ import {
   type PermissionAskedProperties,
   type PermissionRepliedProperties,
 } from "../core/approvals.js";
+import {
+  toQuestionRequest,
+  type QuestionAskedProperties,
+  type QuestionRejectedProperties,
+  type QuestionRepliedProperties,
+} from "../core/questions.js";
 import type { NormalizedEvent } from "../core/events.js";
 
 /**
@@ -128,6 +134,32 @@ export function normalizeEvent(event: Event): NormalizedEvent | null {
       status: props.reply === "reject" ? "rejected" : "approved",
     };
   }
+  if (raw.type === "question.asked" || raw.type === "question.v2.asked") {
+    const props = raw.properties as QuestionAskedProperties;
+    if (!props?.sessionID || !props?.id) return null;
+    return { kind: "question", ...toQuestionRequest(props) };
+  }
+  if (raw.type === "question.replied" || raw.type === "question.v2.replied") {
+    const props = raw.properties as QuestionRepliedProperties;
+    if (!props?.sessionID || !props?.requestID) return null;
+    return {
+      kind: "question_resolved",
+      sessionID: props.sessionID,
+      requestID: props.requestID,
+      status: "answered",
+      answers: props.answers,
+    };
+  }
+  if (raw.type === "question.rejected" || raw.type === "question.v2.rejected") {
+    const props = raw.properties as QuestionRejectedProperties;
+    if (!props?.sessionID || !props?.requestID) return null;
+    return {
+      kind: "question_resolved",
+      sessionID: props.sessionID,
+      requestID: props.requestID,
+      status: "rejected",
+    };
+  }
 
   switch (event.type) {
     case "message.part.updated":
@@ -189,7 +221,7 @@ export interface EventBridgeOptions {
    * gate (FR8/FR10) hooks here to see `permission.asked`/`permission.replied`, and boot
    * smoke tests hook here to observe the live stream — so `/global/event` is read once.
    */
-  onRawEvent?: (event: Event) => void;
+  onRawEvent?: (event: Event, context: { directory: string }) => void;
   /**
    * Called if the event stream terminates with an error while the bridge is still open, so a
    * dropped subscription surfaces instead of silently ending the stream.
@@ -211,8 +243,8 @@ export function createEventBridge(
   let closed = false;
 
   /** Feed the raw event to observers, then fan its normalized form to subscribers. */
-  function dispatch(event: Event): void {
-    options.onRawEvent?.(event);
+  function dispatch(event: Event, directory: string): void {
+    options.onRawEvent?.(event, { directory });
     const normalized = normalizeEvent(event);
     if (!normalized) return;
     for (const listener of listeners) listener(normalized);
@@ -222,7 +254,8 @@ export function createEventBridge(
     const { stream } = await client.global.event({ signal: abort.signal });
     for await (const event of stream) {
       if (closed) break;
-      dispatch((event as { directory: string; payload: Event }).payload);
+      const globalEvent = event as { directory: string; payload: Event };
+      dispatch(globalEvent.payload, globalEvent.directory);
     }
   }
 

@@ -14,7 +14,7 @@ export interface MessageBubbleProps {
 }
 
 /** Block kinds InlineSteps renders visibly — an approval-only turn (a paused write) still shows. */
-const RENDERABLE_KINDS = new Set(["text", "reasoning", "tool", "approval"]);
+const RENDERABLE_KINDS = new Set(["text", "reasoning", "tool", "approval", "question"]);
 
 export function MessageBubble({ message }: MessageBubbleProps) {
   if (message.role === "user") {

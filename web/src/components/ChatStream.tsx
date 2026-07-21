@@ -30,6 +30,10 @@ export function ChatStream({ messages, isWorking, error }: ChatStreamProps) {
   }, [messages, isWorking, error]);
 
   const isEmpty = messages.length === 0 && !isWorking && !error;
+  const waitingForInput = messages.some((message) =>
+    message.role === "assistant" &&
+    message.blocks.some((block) => block.kind === "question" && block.status === "pending"),
+  );
 
   return (
     <div className="chat-scroll flex-1 overflow-y-auto px-5 py-7 sm:px-8">
@@ -57,12 +61,14 @@ export function ChatStream({ messages, isWorking, error }: ChatStreamProps) {
         )}
 
         {isWorking && (
-          <div role="status" aria-label="Agent working" className="flex items-center gap-3 pl-11">
+          <div role="status" aria-label={waitingForInput ? "Agent waiting for input" : "Agent working"} className="flex items-center gap-3 pl-11">
             <div className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-2 shadow-sm">
               <span className="typing-dot h-1.5 w-1.5 rounded-full bg-violet-500" />
               <span className="typing-dot h-1.5 w-1.5 rounded-full bg-violet-500" />
               <span className="typing-dot h-1.5 w-1.5 rounded-full bg-violet-500" />
-              <span className="ml-1 text-xs font-medium text-slate-500">Working…</span>
+              <span className="ml-1 text-xs font-medium text-slate-500">
+                {waitingForInput ? "Waiting for your answer…" : "Working…"}
+              </span>
             </div>
           </div>
         )}

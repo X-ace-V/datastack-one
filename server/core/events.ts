@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ApprovalRequestSchema } from "./approvals.js";
+import { QuestionRequestSchema } from "./questions.js";
 
 /**
  * Pure SSE (Server-Sent Events) framing + the normalized chat-event contract. The OpenCode
@@ -54,6 +55,8 @@ export const NORMALIZED_EVENT_KINDS = [
   "error",
   "approval",
   "approval_resolved",
+  "question",
+  "question_resolved",
   "session_updated",
   "session_status",
 ] as const;
@@ -182,6 +185,22 @@ export const ApprovalResolvedEventSchema = z.object({
 });
 export type ApprovalResolvedEvent = z.infer<typeof ApprovalResolvedEventSchema>;
 
+/** The agent paused on OpenCode's interactive `question` tool and needs user input. */
+export const QuestionEventSchema = QuestionRequestSchema.extend({
+  kind: z.literal("question"),
+});
+export type QuestionEvent = z.infer<typeof QuestionEventSchema>;
+
+/** A question was answered or rejected, clearing its inline controls on every client. */
+export const QuestionResolvedEventSchema = z.object({
+  ...baseFields,
+  kind: z.literal("question_resolved"),
+  requestID: z.string().min(1),
+  status: z.enum(["answered", "rejected"]),
+  answers: z.array(z.array(z.string())).optional(),
+});
+export type QuestionResolvedEvent = z.infer<typeof QuestionResolvedEventSchema>;
+
 /** OpenCode changed a session title, including its native first-prompt title generation. */
 export const SessionUpdatedEventSchema = z.object({
   ...baseFields,
@@ -212,6 +231,8 @@ export const NormalizedEventSchema = z.discriminatedUnion("kind", [
   ErrorEventSchema,
   ApprovalEventSchema,
   ApprovalResolvedEventSchema,
+  QuestionEventSchema,
+  QuestionResolvedEventSchema,
   SessionUpdatedEventSchema,
   SessionStatusEventSchema,
 ]);

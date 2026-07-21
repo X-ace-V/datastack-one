@@ -90,4 +90,21 @@ describe("InlineSteps", () => {
     expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
+
+  it("renders answer controls for an interactive question block", () => {
+    const blocks: InlineBlock[] = [{
+      kind: "question",
+      requestID: "question_1",
+      status: "pending",
+      questions: [{
+        header: "Warehouse",
+        question: "Which warehouse should I target?",
+        options: [{ label: "DuckDB", description: "Run locally" }],
+      }],
+    }];
+    const { container } = render(<InlineSteps blocks={blocks} />);
+    expect(container.querySelector('[data-role="question"]')).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /DuckDB.*Run locally/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+  });
 });

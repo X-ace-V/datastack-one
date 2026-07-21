@@ -4,6 +4,7 @@ import { createDatastackOpencode } from "./opencode/client.js";
 import { createEventBridge } from "./opencode/bridge.js";
 import { createEventHub } from "./opencode/hub.js";
 import { createApprovalGate } from "./opencode/approvals.js";
+import { createQuestionGate } from "./opencode/questions.js";
 import { createToolApprovalGate } from "./opencode/tool-approvals.js";
 import { createSessionDqGate } from "./opencode/session-dq.js";
 import { createTranscriptPersister } from "./opencode/transcript.js";
@@ -36,6 +37,9 @@ async function main(): Promise<void> {
   // Capture permission requests into the approval gate (FR10). It is fed from the global event
   // bridge's single cross-directory pump below, so every folder-rooted runtime is observed.
   const approvals = createApprovalGate(runtime.client);
+  // OpenCode's `question` tool blocks on a distinct reply/reject API. Capture it beside
+  // permissions so the browser can render choices and resume the same folder-rooted session.
+  const questions = createQuestionGate(runtime.v2Client);
   // Persist each assistant turn's blocks to `platform.messages` when the turn goes idle (V6.2),
   // so reopening a session reconstructs its full transcript. Fed off the same raw pump below.
   const transcript = createTranscriptPersister(store, {
@@ -45,8 +49,9 @@ async function main(): Promise<void> {
   // persister, while the bridge fans normalized chat events (text/reasoning/tool/idle/error) to
   // its subscribers.
   const bridge = createEventBridge(runtime.client, {
-    onRawEvent: (event) => {
-      approvals.ingest(event);
+    onRawEvent: (event, { directory }) => {
+      approvals.ingest(event, directory);
+      questions.ingest(event, directory);
       transcript.ingest(event);
       if (event.type === "session.updated") {
         const info = event.properties.info;
@@ -72,6 +77,7 @@ async function main(): Promise<void> {
   const app = buildServer({
     opencode: runtime.client,
     approvals,
+    questions,
     toolApprovals,
     dqGate,
     store,

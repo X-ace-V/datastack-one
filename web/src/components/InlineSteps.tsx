@@ -3,6 +3,7 @@ import type { InlineBlock } from "../store/sessionStore";
 import { ApprovalPill } from "./ApprovalPill";
 import { MarkdownText } from "./MarkdownText";
 import { ToolCard } from "./ToolCard";
+import { QuestionCard } from "./QuestionCard";
 
 /**
  * The ordered body of an assistant turn (TASKS V2.5/V2.6, PRD FR2/FR10, ARCHITECTURE §4). The store
@@ -61,6 +62,8 @@ export function InlineSteps({ blocks }: InlineStepsProps) {
             return <ToolCard key={block.callID} block={block} />;
           case "approval":
             return <ApprovalPill key={block.requestID} block={block} />;
+          case "question":
+            return <QuestionCard key={block.requestID} block={block} />;
           default: {
             const _never: never = block;
             void _never;

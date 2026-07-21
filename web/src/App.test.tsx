@@ -237,6 +237,75 @@ describe("App chat flow (V2.4)", () => {
   });
 });
 
+describe("App interaction recovery", () => {
+  const SESSION = {
+    id: "ses_question",
+    title: "Warehouse setup",
+    model: "opencode/big-pickle" as string | null,
+    createdAt: "2026-07-20T10:00:00Z",
+    updatedAt: "2026-07-20T10:00:00Z",
+  };
+
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const target = String(url);
+      if (target === "/api/interactions") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            approvals: [],
+            questions: [{
+              requestID: "question_recovered",
+              sessionID: SESSION.id,
+              messageID: "msg_question",
+              callID: "call_question",
+              questions: [{
+                header: "Warehouse",
+                question: "Which warehouse should I target?",
+                options: [{ label: "DuckDB", description: "Run locally" }],
+              }],
+            }],
+          }),
+        };
+      }
+      if (target === "/api/sessions/status") {
+        return { ok: true, status: 200, json: async () => ({ statuses: {} }) };
+      }
+      if (target === "/api/models") {
+        return { ok: true, status: 200, json: async () => ({ default: null, providers: [] }) };
+      }
+      if (target.endsWith("/lineage")) {
+        return { ok: true, status: 200, json: async () => ({ lineage: [] }) };
+      }
+      if (target === `/api/sessions/${SESSION.id}`) {
+        return { ok: true, status: 200, json: async () => ({ ...SESSION, messages: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ sessions: [SESSION] }) };
+    }));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("restores answer controls after refresh instead of leaving a hidden running tool", async () => {
+    render(<App />);
+    const sessionButton = await screen.findByRole("button", { name: "Warehouse setup" });
+    await waitFor(() => expect(screen.getByLabelText("Waiting for input")).toBeTruthy());
+    fireEvent.click(sessionButton);
+    await waitFor(() => {
+      expect(screen.getByText("Which warehouse should I target?")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Skip question" })).toBeTruthy();
+    });
+    expect(screen.getByText("Waiting for your input")).toBeTruthy();
+  });
+});
+
 describe("App session reopen (V6.2)", () => {
   const SESSION = {
     id: "ses_1",

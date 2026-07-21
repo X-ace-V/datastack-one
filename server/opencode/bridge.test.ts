@@ -100,6 +100,22 @@ function repliedEvent(requestID: string, sessionID: string, reply: string): Even
   } as unknown as Event;
 }
 
+function questionAskedEvent(type = "question.asked"): Event {
+  return {
+    type,
+    properties: {
+      id: "question_1",
+      sessionID: "ses_1",
+      questions: [{
+        header: "Warehouse",
+        question: "Which warehouse?",
+        options: [{ label: "DuckDB", description: "Local" }],
+      }],
+      tool: { messageID: "msg_1", callID: "call_question" },
+    },
+  } as unknown as Event;
+}
+
 describe("normalizeEvent", () => {
   it("maps a text part to a text event keyed by session/message/part", () => {
     const event = partEvent({
@@ -318,6 +334,46 @@ describe("normalizeEvent", () => {
     });
   });
 
+  it.each(["question.asked", "question.v2.asked"])(
+    "maps %s to an inline interactive question",
+    (type) => {
+      expect(normalizeEvent(questionAskedEvent(type))).toEqual({
+        kind: "question",
+        requestID: "question_1",
+        sessionID: "ses_1",
+        questions: [{
+          header: "Warehouse",
+          question: "Which warehouse?",
+          options: [{ label: "DuckDB", description: "Local" }],
+        }],
+        messageID: "msg_1",
+        callID: "call_question",
+      });
+    },
+  );
+
+  it("maps answered and rejected question events to terminal resolutions", () => {
+    expect(normalizeEvent({
+      type: "question.replied",
+      properties: { sessionID: "ses_1", requestID: "question_1", answers: [["DuckDB"]] },
+    } as unknown as Event)).toEqual({
+      kind: "question_resolved",
+      sessionID: "ses_1",
+      requestID: "question_1",
+      status: "answered",
+      answers: [["DuckDB"]],
+    });
+    expect(normalizeEvent({
+      type: "question.v2.rejected",
+      properties: { sessionID: "ses_1", requestID: "question_1" },
+    } as unknown as Event)).toEqual({
+      kind: "question_resolved",
+      sessionID: "ses_1",
+      requestID: "question_1",
+      status: "rejected",
+    });
+  });
+
   it("drops unsupported or malformed non-chat event types", () => {
     for (const type of ["session.status", "message.updated", "server.connected", "file.watcher.updated"]) {
       const event = { type, properties: { sessionID: "ses_1" } } as unknown as Event;
@@ -364,6 +420,11 @@ describe("normalizeEvent", () => {
       } as unknown as Event,
       askedEvent("perm_1", "s"),
       repliedEvent("perm_1", "s", "once"),
+      questionAskedEvent(),
+      {
+        type: "question.replied",
+        properties: { sessionID: "s", requestID: "question_1", answers: [["DuckDB"]] },
+      } as unknown as Event,
       {
         type: "session.updated",
         properties: { info: { id: "s", title: "Native title" } },
@@ -440,6 +501,36 @@ describe("createEventBridge", () => {
         status: "approved",
       },
     ]);
+    await bridge.close();
+  });
+
+  it("delivers a question and its answer over the normalized stream", async () => {
+    const src = makeEventStream();
+    const bridge = createEventBridge(mockClient(src.stream));
+    const seen: unknown[] = [];
+    bridge.subscribe((event) => seen.push(event));
+    src.push(questionAskedEvent());
+    src.push({
+      type: "question.replied",
+      properties: { sessionID: "ses_1", requestID: "question_1", answers: [["DuckDB"]] },
+    } as unknown as Event);
+    await flush();
+    expect(seen.map((event) => (event as { kind: string }).kind)).toEqual([
+      "question",
+      "question_resolved",
+    ]);
+    await bridge.close();
+  });
+
+  it("passes the global event directory to raw interaction observers", async () => {
+    const src = makeEventStream();
+    const raw: Array<{ event: Event; directory: string }> = [];
+    const bridge = createEventBridge(mockClient(src.stream), {
+      onRawEvent: (event, context) => raw.push({ event, directory: context.directory }),
+    });
+    src.push(questionAskedEvent());
+    await flush();
+    expect(raw).toEqual([{ event: questionAskedEvent(), directory: "/workspace" }]);
     await bridge.close();
   });
 

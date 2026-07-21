@@ -122,6 +122,8 @@ describe("useEvents — connection", () => {
       "error",
       "approval",
       "approval_resolved",
+      "question",
+      "question_resolved",
     ]) {
       expect(es.hasChannel(channel)).toBe(true);
     }
@@ -176,6 +178,17 @@ describe("useEvents — routing", () => {
       { kind: "error", sessionID: "s", message: "boom" },
       { kind: "approval", sessionID: "s", requestID: "r", type: "run_transform", metadata: {} },
       { kind: "approval_resolved", sessionID: "s", requestID: "r", status: "approved" },
+      {
+        kind: "question",
+        sessionID: "s",
+        requestID: "q",
+        questions: [{
+          header: "Warehouse",
+          question: "Which warehouse?",
+          options: [{ label: "DuckDB", description: "Local" }],
+        }],
+      },
+      { kind: "question_resolved", sessionID: "s", requestID: "q", status: "rejected" },
     ];
     act(() => events.forEach((e, i) => es.emit(e, i + 1)));
     expect(onEvent.mock.calls.map((c) => c[0])).toEqual(events);

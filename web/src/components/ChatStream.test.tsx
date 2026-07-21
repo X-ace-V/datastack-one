@@ -39,6 +39,26 @@ describe("ChatStream", () => {
     expect(screen.getByText("Working…")).toBeTruthy();
   });
 
+  it("says it is waiting for an answer when a question is pending", () => {
+    const messages: ChatMessage[] = [{
+      role: "assistant",
+      id: "a-question",
+      blocks: [{
+        kind: "question",
+        requestID: "q1",
+        status: "pending",
+        questions: [{
+          header: "Warehouse",
+          question: "Which warehouse?",
+          options: [{ label: "DuckDB", description: "Local" }],
+        }],
+      }],
+    }];
+    render(<ChatStream messages={messages} isWorking={true} error={null} />);
+    expect(screen.getByRole("status", { name: "Agent waiting for input" })).toBeTruthy();
+    expect(screen.getByText("Waiting for your answer…")).toBeTruthy();
+  });
+
   it("surfaces a turn error as an alert", () => {
     render(<ChatStream messages={CONVO} isWorking={false} error="model overloaded" />);
     const alert = screen.getByRole("alert");

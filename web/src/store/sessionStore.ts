@@ -49,6 +49,26 @@ export interface ApprovalRequest {
   patterns?: string[];
 }
 
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+export interface QuestionInfo {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiple?: boolean;
+  /** OpenCode defaults this to true when omitted. */
+  custom?: boolean;
+}
+export interface QuestionRequest {
+  requestID: string;
+  sessionID: string;
+  questions: QuestionInfo[];
+  messageID?: string;
+  callID?: string;
+}
+
 export interface TextEvent {
   kind: "text";
   sessionID: string;
@@ -96,6 +116,16 @@ export interface ApprovalResolvedEvent {
   requestID: string;
   status: "approved" | "rejected";
 }
+export interface QuestionEvent extends QuestionRequest {
+  kind: "question";
+}
+export interface QuestionResolvedEvent {
+  kind: "question_resolved";
+  sessionID: string;
+  requestID: string;
+  status: "answered" | "rejected";
+  answers?: string[][];
+}
 export interface SessionUpdatedEvent {
   kind: "session_updated";
   sessionID: string;
@@ -117,6 +147,8 @@ export type NormalizedEvent =
   | ErrorEvent
   | ApprovalEvent
   | ApprovalResolvedEvent
+  | QuestionEvent
+  | QuestionResolvedEvent
   | SessionUpdatedEvent
   | SessionStatusEvent;
 
@@ -124,6 +156,7 @@ export type NormalizedEvent =
 
 /** The resolution of an inline approval pill (FR10). `pending` until a human answers. */
 export type ApprovalStatus = "pending" | "approved" | "rejected";
+export type QuestionStatus = "pending" | "answered" | "rejected";
 
 /**
  * One rendered unit of an assistant turn, in reading order (ARCHITECTURE §4). The stream
@@ -154,6 +187,15 @@ export type InlineBlock =
       callID?: string;
       patterns?: string[];
       status: ApprovalStatus;
+    }
+  | {
+      kind: "question";
+      requestID: string;
+      questions: QuestionInfo[];
+      messageID?: string;
+      callID?: string;
+      status: QuestionStatus;
+      answers?: string[][];
     };
 
 /** A user turn — plain text the user typed (or the runtime echoed back). */
@@ -184,6 +226,7 @@ export type ChatMessage = UserMessage | AssistantMessage;
 export interface SessionLiveState {
   messages: ChatMessage[];
   pendingApprovals: ApprovalRequest[];
+  pendingQuestions: QuestionRequest[];
   isWorking: boolean;
   error: string | null;
   /** Composer state is per session, so switching never moves a draft or file queue across chats. */
@@ -207,6 +250,7 @@ export function createEmptySessionState(): SessionLiveState {
   return {
     messages: [],
     pendingApprovals: [],
+    pendingQuestions: [],
     isWorking: false,
     error: null,
     draft: "",
@@ -231,7 +275,7 @@ export interface PersistedMessage {
   role: "user" | "assistant";
   id: string;
   content: string;
-  blocks?: Array<Exclude<InlineBlock, { kind: "approval" }>>;
+  blocks?: Array<Extract<InlineBlock, { kind: "text" | "reasoning" | "tool" }>>;
   attachments?: AttachmentRef[];
 }
 
@@ -301,6 +345,12 @@ function appendApproval(messages: ChatMessage[], event: ApprovalEvent): ChatMess
     patterns: event.patterns,
     status: "pending",
   };
+  if (messages.some((message) =>
+    message.role === "assistant" &&
+    message.blocks.some((candidate) =>
+      candidate.kind === "approval" && candidate.requestID === event.requestID,
+    )
+  )) return messages;
   // Prefer the assistant message holding the gated tool call; fall back to the latest one.
   let idx = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -320,6 +370,71 @@ function appendApproval(messages: ChatMessage[], event: ApprovalEvent): ChatMess
   return messages.map((m, i) =>
     i === idx ? { ...target, blocks: [...target.blocks, block] } : m,
   );
+}
+
+/** Append a question beside its tool call; recovery is idempotent by request id. */
+function appendQuestion(messages: ChatMessage[], event: QuestionEvent): ChatMessage[] {
+  const block: InlineBlock = {
+    kind: "question",
+    requestID: event.requestID,
+    questions: event.questions,
+    messageID: event.messageID,
+    callID: event.callID,
+    status: "pending",
+  };
+  if (messages.some((message) =>
+    message.role === "assistant" &&
+    message.blocks.some((candidate) =>
+      candidate.kind === "question" && candidate.requestID === event.requestID,
+    )
+  )) return messages;
+
+  let idx = event.messageID
+    ? messages.findIndex((message) => message.role === "assistant" && message.id === event.messageID)
+    : -1;
+  if (idx < 0 && event.callID) {
+    idx = messages.findIndex((message) =>
+      message.role === "assistant" &&
+      message.blocks.some((candidate) => candidate.kind === "tool" && candidate.callID === event.callID),
+    );
+  }
+  if (idx < 0) {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === "assistant") {
+        idx = i;
+        break;
+      }
+    }
+  }
+  if (idx < 0) {
+    return [...messages, {
+      role: "assistant",
+      id: event.messageID ?? `question:${event.requestID}`,
+      blocks: [block],
+    }];
+  }
+  const target = messages[idx] as AssistantMessage;
+  return messages.map((message, i) =>
+    i === idx ? { ...target, blocks: [...target.blocks, block] } : message,
+  );
+}
+
+function resolveQuestion(
+  messages: ChatMessage[],
+  requestID: string,
+  status: QuestionStatus,
+  answers?: string[][],
+): ChatMessage[] {
+  return messages.map((message) => {
+    if (message.role !== "assistant") return message;
+    let changed = false;
+    const blocks = message.blocks.map((block) => {
+      if (block.kind !== "question" || block.requestID !== requestID) return block;
+      changed = true;
+      return { ...block, status, ...(answers ? { answers } : {}) };
+    });
+    return changed ? { ...message, blocks } : message;
+  });
 }
 
 /** Mark the approval pill for `requestID` resolved wherever it lives in the transcript. */
@@ -406,6 +521,7 @@ export function reduce(state: SessionLiveState, action: StoreAction): SessionLiv
       ...state,
       messages,
       pendingApprovals: [],
+      pendingQuestions: [],
       isWorking: false,
       error: null,
       pendingEchoes: [],
@@ -524,6 +640,34 @@ export function reduce(state: SessionLiveState, action: StoreAction): SessionLiv
         ),
       };
     }
+    case "question": {
+      const { kind: _kind, ...request } = event;
+      const already = state.pendingQuestions.some(
+        (question) => question.requestID === event.requestID,
+      );
+      return {
+        ...state,
+        isWorking: true,
+        messages: appendQuestion(state.messages, event),
+        pendingQuestions: already
+          ? state.pendingQuestions
+          : [...state.pendingQuestions, request],
+      };
+    }
+    case "question_resolved": {
+      return {
+        ...state,
+        messages: resolveQuestion(
+          state.messages,
+          event.requestID,
+          event.status,
+          event.answers,
+        ),
+        pendingQuestions: state.pendingQuestions.filter(
+          (question) => question.requestID !== event.requestID,
+        ),
+      };
+    }
     case "idle": {
       // The turn finished — clear echo bookkeeping so a stale prompt can't shadow the next turn.
       return { ...state, isWorking: false, pendingEchoes: [], echoMessageIds: [] };
@@ -604,7 +748,13 @@ export interface Store {
 }
 
 /** User-facing session lifecycle shown for active and inactive rows. */
-export type SessionUiStatus = "idle" | "working" | "retry" | "waiting_approval" | "error";
+export type SessionUiStatus =
+  | "idle"
+  | "working"
+  | "retry"
+  | "waiting_approval"
+  | "waiting_input"
+  | "error";
 
 /** Durable session metadata plus transient OpenCode/background state. */
 export interface SessionSummary extends Session {
@@ -686,6 +836,8 @@ export function useSessionStore(): Store {
       });
     } else if (event.kind === "approval") {
       sessionMetaRef.current.set(event.sessionID, { ...cached, status: "waiting_approval" });
+    } else if (event.kind === "question") {
+      sessionMetaRef.current.set(event.sessionID, { ...cached, status: "waiting_input" });
     } else if (event.kind === "idle") {
       sessionMetaRef.current.set(event.sessionID, { ...cached, status: "idle" });
     } else if (event.kind === "error") {
@@ -698,11 +850,25 @@ export function useSessionStore(): Store {
       sessionMetaRef.current.set(event.sessionID, {
         ...cached,
         status:
-          next.pendingApprovals.length > 0
-            ? "waiting_approval"
-            : next.isWorking
-              ? "working"
-              : "idle",
+          next.pendingQuestions.length > 0
+            ? "waiting_input"
+            : next.pendingApprovals.length > 0
+              ? "waiting_approval"
+              : next.isWorking
+                ? "working"
+                : "idle",
+      });
+    } else if (event.kind === "question_resolved") {
+      sessionMetaRef.current.set(event.sessionID, {
+        ...cached,
+        status:
+          next.pendingQuestions.length > 0
+            ? "waiting_input"
+            : next.pendingApprovals.length > 0
+              ? "waiting_approval"
+              : next.isWorking
+                ? "working"
+                : "idle",
       });
     } else {
       sessionMetaRef.current.set(event.sessionID, { ...cached, status: "working" });
@@ -728,15 +894,33 @@ export function useSessionStore(): Store {
         if (event.kind === "approval") {
           return { ...session, status: "waiting_approval" };
         }
+        if (event.kind === "question") {
+          return { ...session, status: "waiting_input" };
+        }
         if (event.kind === "approval_resolved") {
           return {
             ...session,
             status:
-              next.pendingApprovals.length > 0
-                ? "waiting_approval"
-                : next.isWorking
-                  ? "working"
-                  : "idle",
+              next.pendingQuestions.length > 0
+                ? "waiting_input"
+                : next.pendingApprovals.length > 0
+                  ? "waiting_approval"
+                  : next.isWorking
+                    ? "working"
+                    : "idle",
+          };
+        }
+        if (event.kind === "question_resolved") {
+          return {
+            ...session,
+            status:
+              next.pendingQuestions.length > 0
+                ? "waiting_input"
+                : next.pendingApprovals.length > 0
+                  ? "waiting_approval"
+                  : next.isWorking
+                    ? "working"
+                    : "idle",
           };
         }
         if (event.kind === "idle") return { ...session, status: "idle" };

@@ -487,6 +487,69 @@ export async function answerApproval(
   return (await res.json()) as ApprovalResult;
 }
 
+/** User response to OpenCode's interactive `question` tool. */
+export type QuestionDecision =
+  | { action: "answer"; answers: string[][] }
+  | { action: "reject" };
+
+export interface QuestionResult {
+  requestID: string;
+  action: "answer" | "reject";
+  status: "answered" | "rejected";
+  answers?: string[][];
+}
+
+/** Resume a paused question tool with ordered answers, or reject it. */
+export async function answerQuestion(
+  requestID: string,
+  decision: QuestionDecision,
+): Promise<QuestionResult> {
+  const res = await fetch(`/api/questions/${requestID}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(decision),
+  });
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to answer question"));
+  }
+  return (await res.json()) as QuestionResult;
+}
+
+/** Snapshot used to recover interactions missed before the SSE stream connected. */
+export interface PendingInteractions {
+  approvals: Array<{
+    requestID: string;
+    sessionID: string;
+    type: string;
+    metadata: Record<string, unknown>;
+    callID?: string;
+    patterns?: string[];
+  }>;
+  questions: Array<{
+    requestID: string;
+    sessionID: string;
+    questions: Array<{
+      question: string;
+      header: string;
+      options: Array<{ label: string; description: string }>;
+      multiple?: boolean;
+      custom?: boolean;
+    }>;
+    messageID?: string;
+    callID?: string;
+  }>;
+}
+
+/** Load every pending human interaction across all independently-running sessions. */
+export async function listPendingInteractions(): Promise<PendingInteractions> {
+  const res = await fetch("/api/interactions");
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, "Failed to recover pending interactions"));
+  }
+  const body = (await res.json()) as Partial<PendingInteractions>;
+  return { approvals: body.approvals ?? [], questions: body.questions ?? [] };
+}
+
 /**
  * A registered database connection, mirroring the backend `ConnectionSchema` (FR5). The
  * credentialed `url` is deliberately absent from the shape — it is entered once in the Settings →

@@ -34,6 +34,7 @@ function messageOf(err: unknown): string {
 function statusLabel(status: SessionUiStatus): string {
   if (status === "working") return "Working";
   if (status === "waiting_approval") return "Waiting for approval";
+  if (status === "waiting_input") return "Waiting for input";
   if (status === "retry") return "Retrying";
   if (status === "error") return "Failed";
   return "Idle";
@@ -45,6 +46,8 @@ function StatusDot({ status }: { status: SessionUiStatus }) {
       ? "bg-violet-400 animate-pulse shadow-[0_0_0_3px_rgba(167,139,250,0.12)]"
       : status === "waiting_approval"
         ? "bg-amber-500 animate-pulse"
+        : status === "waiting_input"
+          ? "bg-sky-500 animate-pulse"
         : status === "retry"
           ? "bg-orange-500 animate-pulse"
           : status === "error"

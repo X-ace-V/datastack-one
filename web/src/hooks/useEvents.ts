@@ -33,6 +33,8 @@ const CHANNELS = [
   "error",
   "approval",
   "approval_resolved",
+  "question",
+  "question_resolved",
   "session_updated",
   "session_status",
 ] as const satisfies readonly NormalizedEvent["kind"][];

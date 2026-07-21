@@ -52,10 +52,10 @@ function repliedEvent(requestID: string, sessionID: string): Event {
 
 /** A reply client that records its calls; `fail` makes the reply return an error envelope. */
 function mockClient(fail = false) {
-  const calls: Array<{ path: unknown; body: unknown }> = [];
+  const calls: Array<{ path: unknown; body: unknown; query?: unknown }> = [];
   const client = {
     postSessionIdPermissionsPermissionId: vi.fn(
-      async (options: { path: unknown; body: unknown }) => {
+      async (options: { path: unknown; body: unknown; query?: unknown }) => {
         calls.push(options);
         return fail
           ? { data: undefined, error: { message: "runtime boom" } }
@@ -123,6 +123,18 @@ describe("createApprovalGate", () => {
     });
     expect(gate.pending()).toEqual([]);
     expect(gate.get("perm_1")).toBeUndefined();
+  });
+
+  it("replies in the folder that emitted the cross-directory permission event", async () => {
+    const { client, calls } = mockClient();
+    const gate = createApprovalGate(client);
+    gate.ingest(askedEvent("perm_folder", "ses_9"), "/Users/parker/warehouse");
+    await gate.reply("perm_folder", "approve");
+    expect(calls).toEqual([{
+      path: { id: "ses_9", permissionID: "perm_folder" },
+      body: { response: "once" },
+      query: { directory: "/Users/parker/warehouse" },
+    }]);
   });
 
   it("reject replies 'reject' and drops the request from the queue", async () => {

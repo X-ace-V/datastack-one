@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { SessionModelControl } from "./components/SessionModelControl";
@@ -6,7 +6,7 @@ import { DataPanel } from "./components/DataPanel";
 import { ConnectionsPanel } from "./components/ConnectionsPanel";
 import { useEvents } from "./hooks/useEvents";
 import { useSessionStore } from "./store/sessionStore";
-import { getSession } from "./lib/api";
+import { getSession, listPendingInteractions } from "./lib/api";
 
 /**
  * Application root — the frame the conversational shell renders inside: a session sidebar
@@ -23,8 +23,24 @@ import { getSession } from "./lib/api";
  */
 export function App() {
   const store = useSessionStore();
-  // One EventSource for the whole app; the store routes each event to its session by sessionID.
-  useEvents({ onEvent: store.handleEvent });
+  // Recover both kinds of human interaction after a refresh or replay-window miss. Feeding the
+  // snapshot through the same idempotent reducer as SSE keeps one source of UI truth.
+  const recoverInteractions = useCallback(() => {
+    void listPendingInteractions()
+      .then((snapshot) => {
+        for (const approval of snapshot.approvals) {
+          store.handleEvent({ kind: "approval", ...approval });
+        }
+        for (const question of snapshot.questions) {
+          store.handleEvent({ kind: "question", ...question });
+        }
+      })
+      .catch(() => {
+        // The live SSE stream still operates if a one-shot recovery read fails.
+      });
+  }, [store.handleEvent]);
+  // One EventSource for the whole app; recover again whenever it reconnects.
+  useEvents({ onEvent: store.handleEvent, onOpen: recoverInteractions });
   // Settings → Connections opens as a modal overlay above the conversation (V5.3), not a route.
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dataPanelOpen, setDataPanelOpen] = useState(false);
@@ -34,6 +50,10 @@ export function App() {
   useEffect(() => {
     void store.loadSessions();
   }, [store.loadSessions]);
+
+  useEffect(() => {
+    recoverInteractions();
+  }, [recoverInteractions]);
 
   // Reopen (V6.2, FR1): when a session becomes active with no live state (a fresh page load, or
   // one created in a prior server run), fetch its persisted history and reconstruct the transcript
@@ -98,8 +118,14 @@ export function App() {
                   {store.sessions.find((session) => session.id === store.activeSessionId)?.title ?? "Session"}
                 </h2>
                 <p className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-500">
-                  <span className={`h-1.5 w-1.5 rounded-full ${store.activeState.isWorking ? "animate-pulse bg-violet-500" : "bg-emerald-500"}`} />
-                  {store.activeState.isWorking ? "Agent is working" : "Ready"}
+                  <span className={`h-1.5 w-1.5 rounded-full ${store.activeState.pendingQuestions.length > 0 ? "animate-pulse bg-sky-500" : store.activeState.pendingApprovals.length > 0 ? "animate-pulse bg-amber-500" : store.activeState.isWorking ? "animate-pulse bg-violet-500" : "bg-emerald-500"}`} />
+                  {store.activeState.pendingQuestions.length > 0
+                    ? "Waiting for your input"
+                    : store.activeState.pendingApprovals.length > 0
+                      ? "Waiting for approval"
+                      : store.activeState.isWorking
+                        ? "Agent is working"
+                        : "Ready"}
                 </p>
               </div>
               {/* Per-session model picker (V6.1): reflects and updates the active session's model. */}

@@ -88,6 +88,8 @@ describe("NormalizedEventSchema", () => {
       "error",
       "approval",
       "approval_resolved",
+      "question",
+      "question_resolved",
       "session_updated",
       "session_status",
     ]);
@@ -181,6 +183,28 @@ describe("NormalizedEventSchema", () => {
         status: "maybe",
       }).success,
     ).toBe(false);
+  });
+
+  it("accepts pending and resolved interactive question events", () => {
+    const question: NormalizedEvent = {
+      kind: "question",
+      sessionID: "s",
+      requestID: "q_1",
+      questions: [{
+        header: "Warehouse",
+        question: "Which warehouse?",
+        options: [{ label: "DuckDB", description: "Local" }],
+      }],
+    };
+    const resolved: NormalizedEvent = {
+      kind: "question_resolved",
+      sessionID: "s",
+      requestID: "q_1",
+      status: "answered",
+      answers: [["DuckDB"]],
+    };
+    expect(NormalizedEventSchema.parse(question)).toEqual(question);
+    expect(NormalizedEventSchema.parse(resolved)).toEqual(resolved);
   });
 });
 

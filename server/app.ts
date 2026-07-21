@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import multipart from "@fastify/multipart";
 import { HealthStatusSchema, type HealthStatus } from "./core/types.js";
 import { ApprovalDecisionSchema } from "./core/approvals.js";
+import { QuestionDecisionSchema } from "./core/questions.js";
 import { CreateProjectRequestSchema } from "./core/projects.js";
 import {
   ChatRequestSchema,
@@ -97,6 +98,12 @@ import {
   type ApprovalGate,
 } from "./opencode/approvals.js";
 import type { ToolApprovalGate } from "./opencode/tool-approvals.js";
+import {
+  InvalidQuestionAnswerError,
+  QuestionReplyError,
+  UnknownQuestionError,
+  type QuestionGate,
+} from "./opencode/questions.js";
 import type { EventHub } from "./opencode/hub.js";
 import { SessionManager, SessionRuntimeError } from "./opencode/sessions.js";
 import type { SessionWarehouseRegistry } from "./store/session-warehouses.js";
@@ -136,6 +143,8 @@ export interface ServerDeps {
    * (bash/edit/webfetch) (FR10). Absent → the approvals route falls back to the tool gate.
    */
   approvals?: ApprovalGate;
+  /** Gate for OpenCode's interactive `question` tool. Absent in health-only test boots. */
+  questions?: QuestionGate;
   /**
    * Approval gate for the custom write tools (V4.1, FR8/FR10). OpenCode does not gate plugin
    * tools, so each write route pauses on this gate before executing. Absent → the write routes
@@ -1280,6 +1289,55 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
           return reply.code(404).send({ error: err.message });
         }
         if (err instanceof ApprovalReplyError) {
+          return reply.code(502).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // Recovery snapshot for every human interaction that can pause an agent turn. SSE normally
+  // delivers these inline, but a refresh or an event older than the replay window must still
+  // render controls rather than leave the runtime waiting invisibly.
+  app.get("/api/interactions", async (_req, reply) => {
+    const approvals = new Map<string, ReturnType<ApprovalGate["pending"]>[number]>();
+    for (const request of deps.toolApprovals?.pending() ?? []) {
+      approvals.set(request.requestID, request);
+    }
+    for (const request of deps.approvals?.pending() ?? []) {
+      approvals.set(request.requestID, request);
+    }
+    return reply.code(200).send({
+      approvals: [...approvals.values()],
+      questions: deps.questions?.pending() ?? [],
+    });
+  });
+
+  // Answer/reject OpenCode's interactive question tool. The gate keeps the runtime directory
+  // captured from `/global/event`, so a session rooted in a connected folder resumes there.
+  app.post<{ Params: { requestID: string } }>(
+    "/api/questions/:requestID",
+    async (req, reply) => {
+      if (!deps.questions) {
+        return reply.code(503).send({ error: "question gate unavailable" });
+      }
+      const parsed = QuestionDecisionSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: "invalid question decision", details: parsed.error.issues });
+      }
+      try {
+        const result = await deps.questions.reply(req.params.requestID, parsed.data);
+        return reply.code(200).send(result);
+      } catch (err) {
+        if (err instanceof UnknownQuestionError) {
+          return reply.code(404).send({ error: err.message });
+        }
+        if (err instanceof InvalidQuestionAnswerError) {
+          return reply.code(400).send({ error: err.message });
+        }
+        if (err instanceof QuestionReplyError) {
           return reply.code(502).send({ error: err.message });
         }
         throw err;

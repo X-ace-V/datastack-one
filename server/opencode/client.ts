@@ -1,4 +1,8 @@
 import { createOpencode, type OpencodeClient, type ServerOptions, type Config } from "@opencode-ai/sdk";
+import {
+  createOpencodeClient as createV2OpencodeClient,
+  type OpencodeClient as V2OpencodeClient,
+} from "@opencode-ai/sdk/v2";
 import { buildOpencodeConfig } from "./config.js";
 
 /**
@@ -29,6 +33,8 @@ export function withDatastackPlugins(config: Config): Config {
 export interface DatastackOpencode {
   /** SDK client bound to the running server (sessions, config, events, permissions). */
   client: OpencodeClient;
+  /** Current SDK surface used for interactive question reply/reject endpoints. */
+  v2Client: V2OpencodeClient;
   /** Base URL the server is listening on (e.g. `http://127.0.0.1:4096`). */
   url: string;
   /** Stops the spawned `opencode` server process. Idempotent per the SDK. */
@@ -61,6 +67,7 @@ export async function createDatastackOpencode(
   });
   return {
     client,
+    v2Client: createV2OpencodeClient({ baseUrl: server.url }),
     url: server.url,
     close: () => server.close(),
   };
