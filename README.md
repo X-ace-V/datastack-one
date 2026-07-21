@@ -16,9 +16,9 @@ Built for the **OpenAI Build Week — Work and Productivity** track using **Code
 
 ## Demo
 
-https://github.com/user-attachments/assets/ac9ba0cc-318c-4e57-ac0e-484e22fcbe9f
+[![Watch the DataStack One demo](https://img.youtube.com/vi/GjpXeGN3cbE/maxresdefault.jpg)](https://youtu.be/GjpXeGN3cbE)
 
-[Open the demo video](https://github.com/user-attachments/assets/ac9ba0cc-318c-4e57-ac0e-484e22fcbe9f) ·
+[Watch the demo on YouTube](https://youtu.be/GjpXeGN3cbE) ·
 [Follow the reproducible walkthrough](./DEMO.md)
 
 ## What it does
