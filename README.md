@@ -12,7 +12,7 @@ project, or a read-only Postgres database; describe the outcome in plain English
 agent profile, query, transform, validate, and publish the data. Every write pauses for human
 approval with the exact action visible before it runs.
 
-Built for the **OpenAI Build Week — Work and Productivity** track using **Codex**.
+Built for the **OpenAI Build Week - Work and Productivity** track using **Codex**.
 
 ## Demo
 
@@ -145,11 +145,11 @@ tests/        Integration and acceptance suites
 data/         Local metadata, uploads, warehouses, and outputs (gitignored)
 ```
 
-- [`DEMO.md`](./DEMO.md) — complete judge walkthrough
-- [`PRD.md`](./PRD.md) — product requirements and acceptance contract
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — system design and trust boundaries
-- [`API.md`](./API.md) — REST, SSE, and internal tool routes
-- [`AGENTS.md`](./AGENTS.md) — engineering rules and lessons from the build
+- [`DEMO.md`](./DEMO.md) - complete judge walkthrough
+- [`PRD.md`](./PRD.md) - product requirements and acceptance contract
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) - system design and trust boundaries
+- [`API.md`](./API.md) - REST, SSE, and internal tool routes
+- [`AGENTS.md`](./AGENTS.md) - engineering rules and lessons from the build
 
 ## Commands
 

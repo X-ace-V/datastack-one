@@ -1,4 +1,4 @@
-# DataStack One — Architecture (v2: Conversational Agent)
+# DataStack One - Architecture (v2: Conversational Agent)
 
 Last updated: 2026-07-19
 Status: **implemented** · supersedes the v1 wizard architecture
@@ -13,7 +13,7 @@ single-user localhost app.
 
 1. **The agent is the interface.** Natural language in → the agent calls tools → results
    stream back. No wizard, no fixed pipeline.
-2. **Don't build the agent loop — drive OpenCode.** We own one embedded OpenCode server and
+2. **Don't build the agent loop - drive OpenCode.** We own one embedded OpenCode server and
    drive **sessions** through it.
 3. **Tools are the only way to touch data.** The agent's *capabilities* are a fixed, audited
    tool set; it chooses the *order*. Writes are approval-gated; reads (profile, query) are free.
@@ -28,13 +28,13 @@ single-user localhost app.
 
 ```mermaid
 flowchart TD
-    subgraph Browser["Browser — localhost:5173"]
+    subgraph Browser["Browser - localhost:5173"]
         SB["Session sidebar"]
         CHAT["Chat + composer<br/>text · attachments · folder · reasoning · tools · approvals"]
         PANEL["Data panel<br/>schema · query results · endpoints"]
     end
 
-    subgraph Backend["Backend — Node/TS (Fastify) :3001"]
+    subgraph Backend["Backend - Node/TS (Fastify) :3001"]
         SESS["Session manager<br/>create/prompt/cancel, persistence"]
         BRIDGE["Event bridge<br/>global.event → SSE (per-session, replay)"]
         APPR["Approval bridge<br/>permission.asked → inline → reply"]
@@ -92,7 +92,7 @@ it) and the Vite dev server. No Electron.
 - **Concurrency/status**: the `/global/event` subscription consumes events from every directory,
   while `/api/sessions/status` queries each active workspace instance to recover background work
   on reload. `session.updated` keeps titles current. Switching the
-  active browser chat is only a view change—it never calls `session.abort`.
+  active browser chat is only a view change - it never calls `session.abort`.
 - **Context injection** (optional, Crux pattern): `noReply` prompts to tell the agent about a
   newly connected source without triggering a reply.
 
@@ -106,7 +106,7 @@ it) and the Vite dev server. No Electron.
 - `permission.asked` (fired when an `ask` tool is about to run) → recorded pending → emitted
   as an SSE `approval` event with the exact SQL/DDL → answered by
   `POST /api/approvals/:requestID` → `client.permission.reply({ requestID, action })`. No
-  `always` — every write is approved once (PRD FR10). Each ask/reply logged to lineage.
+  `always` - every write is approved once (PRD FR10). Each ask/reply logged to lineage.
 
 ### 3.4 Data tools (`server/tools/`, one `@opencode-ai/plugin`)
 The agent-facing capabilities. Registered via `config.plugin` (a plugin module returning a
@@ -114,10 +114,10 @@ The agent-facing capabilities. Registered via `config.plugin` (a plugin module r
 
 | Tool | Args | Does | Permission |
 |------|------|------|-----------|
-| `list_sources` | — | List connected sources in the session. | allow |
+| `list_sources` | - | List connected sources in the session. | allow |
 | `profile_source` | `source` | Schema, types, rows, null %, keys, date cols (DuckDB). | allow |
 | `run_query` | `sql` | **Read-only** SELECT over the session DuckDB (+ attached Postgres). Returns rows. | allow |
-| `list_workspace_files` | — | Supported files in this chat's connected folder; relative paths only. | allow |
+| `list_workspace_files` | - | Supported files in this chat's connected folder; relative paths only. | allow |
 | `read_workspace_file` | `path` | Bounded read of a supported uploaded/folder text file. | allow |
 | `write_workspace_file` | `path, content` | Create/replace a supported text project file, then refresh the index. | **ask** |
 | `attach_source` | `name` | ATTACH a **registered** connection (by name) read-only; the backend resolves name→URL. Never receives the raw URL. | **ask** |
@@ -128,14 +128,14 @@ The agent-facing capabilities. Registered via `config.plugin` (a plugin module r
 | `publish_serving` | `table` | Register a served table + CSV export. | **ask** |
 
 Heavy/credentialed work the plugin can't do in-process calls back to the backend over
-loopback (Crux `internal.ts` pattern) — kept minimal for the MVP.
+loopback (Crux `internal.ts` pattern) - kept minimal for the MVP.
 
 ### 3.5 REST surface
 `/api/sessions` (CRUD) · `/api/sessions/:id/chat` · `…/cancel` · `/api/events` (SSE) ·
 `/api/sessions/:id/sources` (multi-file upload / list) · `/api/sessions/:id/folder` ·
 `/api/sessions/:id/folder/refresh` · `/api/folders` · `/api/approvals/:requestID` ·
 `/api/serve/:name` · `/api/serve/:name.csv` · `/api/models` ·
-`/api/connections` (add/list/delete — secrets never returned) · `/api/connections/:name/test`.
+`/api/connections` (add/list/delete - secrets never returned) · `/api/connections/:name/test`.
 
 ### 3.6 Data plane and session isolation
 `data/warehouse.duckdb` is the **control plane**: sessions, messages (including attachment
@@ -161,7 +161,7 @@ served names receive a session prefix because the legacy URL registry is globall
 ### 3.8 Connections & secrets (`server/connections/`)
 - A **Settings → Connections** panel is the *only* place a database URL is entered. It
   registers Postgres (Neon) connections and stores the secret **server-side and gitignored**
-  (`platform.connections` in DuckDB or `data/connections.json` — never committed, never sent
+  (`platform.connections` in DuckDB or `data/connections.json` - never committed, never sent
   to the browser).
 - **Name-based resolution (hard rule).** Agent tools take a connection/source **name**; the
   backend resolves name → URL and runs `ATTACH '<url>' AS <name> (TYPE postgres, READ_ONLY)`.
@@ -177,25 +177,25 @@ served names receive a session prefix because the legacy URL registry is globall
 Layout mirrors Crux `MainLayout`: **session sidebar (left) + chat stream (center) + data
 panel (right)**. React 19 + Vite + Tailwind v4. REST + SSE (no SDK in the browser).
 
-- **Live store** (`web/src/store/sessionStore.ts`) — a per-session `Map` of live state
+- **Live store** (`web/src/store/sessionStore.ts`) - a per-session `Map` of live state
   (messages, streaming text, reasoning, ordered tool blocks, pending approval, draft,
   attachment upload queue, connected folder/files). Only the
   active session mirrors to React state; background sessions accumulate. Mirrors Crux
   `useSessionStore`.
-- **SSE hook** (`web/src/hooks/useEvents.ts`) — one `EventSource` on `/api/events`; a named
+- **SSE hook** (`web/src/hooks/useEvents.ts`) - one `EventSource` on `/api/events`; a named
   handler per event type routes into the store; `?lastSeq` replay on reconnect. Mirrors Crux
   `useWorkspaceSSE`.
-- **Rendering** — the store turns the event stream into ordered **inline blocks**
+- **Rendering** - the store turns the event stream into ordered **inline blocks**
   (`text | reasoning | tool | approval`). `ChatStream → MessageBubble → InlineSteps` renders
   them in reading order; a `ToolCard` shows tool name + one-line detail + status + expandable
   args/result; an `ApprovalPill` renders inline Allow/Deny with the SQL. Mirrors Crux
   `InlineSteps`.
-- **Sidebar** — session list (create / switch / rename / delete) with OpenCode-generated title
-  changes and working/waiting/retry/error indicators for inactive chats. **Composer** — the only
+- **Sidebar** - session list (create / switch / rename / delete) with OpenCode-generated title
+  changes and working/waiting/retry/error indicators for inactive chats. **Composer** - the only
   attachment/folder entry point: a **+** menu for multi-file upload and starting a folder-rooted
-  session, session-owned chips, retry/remove/refresh, and file-only send. **Data panel** —
+  session, session-owned chips, retry/remove/refresh, and file-only send. **Data panel** -
   output only: `SchemaTable`, `ResultTable`, `EndpointsList`, lineage, and `ModelPicker`.
-- **Settings → Connections** — the only place a database URL is entered: add / test / remove
+- **Settings → Connections** - the only place a database URL is entered: add / test / remove
   Postgres (Neon) connections **by name**; the secret posts to the server-side store, never
   the browser or chat.
 
@@ -250,7 +250,7 @@ web/src/
   hooks/       useEvents.ts (SSE)
   components/  sidebar/ chat/ (ChatStream, MessageBubble, InlineSteps, ToolCard, ApprovalPill,
                Composer) panel/ (SchemaTable, ResultTable, EndpointsList, ModelPicker, CsvUpload)
-               settings/ (Connections — add/test/remove DB connections by name)
+               settings/ (Connections - add/test/remove DB connections by name)
   App.tsx      layout: sidebar + chat + panel
 data/          warehouse.duckdb · landing/ · uploads/  (gitignored)
 fixtures/      synthetic lending CSV + a seed Postgres script (committed)

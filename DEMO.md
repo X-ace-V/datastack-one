@@ -1,12 +1,12 @@
-# DataStack One — Demo walkthrough
+# DataStack One - Demo walkthrough
 
 This is the end-to-end demo: open independent chat sessions, attach files or connect an existing
 local folder from the composer, ask questions in plain English, and have the agent build and
-publish a served report — pausing inline for your approval on every write. Part 2 adds a **live
+publish a served report - pausing inline for your approval on every write. Part 2 adds a **live
 Postgres** (Neon) so the agent can join your session files to real database tables.
 
 Everything here uses **synthetic data only** (`fixtures/loans_sample.csv`, `fixtures/rules.txt`,
-`fixtures/pg_seed.sql`). Never point the app at production data, and never through a free model —
+`fixtures/pg_seed.sql`). Never point the app at production data, and never through a free model -
 a registered connection is attached **read-only**, but the credential still belongs to a
 throwaway demo project. See [`AGENTS.md`](./AGENTS.md) for why the fixture's shape is
 load-bearing.
@@ -29,7 +29,7 @@ reasoning, tool calls, inline approvals, and query results all stream into these
 
 ---
 
-## Part 1 — CSV → ask → build → publish → serve
+## Part 1 - CSV → ask → build → publish → serve
 
 This is the PRD §5 acceptance path, driven entirely by conversation.
 
@@ -41,7 +41,7 @@ This is the PRD §5 acceptance path, driven entirely by conversation.
 - Click the **+** inside the composer, choose **Upload files**, and select
   [`fixtures/loans_sample.csv`](./fixtures/loans_sample.csv). The chooser accepts several files at
   once; each appears as an independently retryable attachment chip. The CSV is registered as a
-  session source and validated in DuckDB — the agent now
+  session source and validated in DuckDB - the agent now
   sees it by name via `list_sources`, with no path or credential ever reaching the model.
 
 Alternatively, choose **Start session from folder** from the same **+** menu and select an existing
@@ -58,7 +58,7 @@ Type an ordinary question, for example:
 > *profile this, then show total balance by branch*
 
 The agent calls `profile_source` and `run_query` (both read-only, no approval needed) and the
-result table lands in the **data panel**. Ad-hoc querying is first-class — you don't have to build
+result table lands in the **data panel**. Ad-hoc querying is first-class - you don't have to build
 a pipeline to interrogate the data.
 
 ### 3. Build and publish a daily branch report
@@ -68,20 +68,20 @@ Now ask it to build something, for example:
 > *clean it per the rules and publish a daily branch summary as an API*
 
 The agent profiles, writes the transform SQL, and calls the write tools. **Each write pauses the
-turn with an inline Allow/Deny that shows the exact SQL/DDL** — `land_parquet`, `load_warehouse`,
+turn with an inline Allow/Deny that shows the exact SQL/DDL** - `land_parquet`, `load_warehouse`,
 `run_transform`, then `publish_serving`. Review each, then approve. Nothing is written until you
 do: the approval posts to `POST /api/approvals/:requestID`, and the backend holds the tool until
 it hears back. A `run_dq_check` that fails will block the publish until the data is fixed.
 
 The `fixtures/rules.txt` doc is deliberately real work (e.g. `loan_amount` is thousands-separated
-text so "convert to numeric" is not a no-op) — the human SQL review at each gate is where you'd
+text so "convert to numeric" is not a no-op) - the human SQL review at each gate is where you'd
 catch a model that gets the arithmetic wrong. A green run proves the **platform** works, not that
 the report is arithmetically correct.
 
 ### 4. Read the served endpoint
 
 Once `publish_serving` is approved, the endpoint shows in the data panel. It reads the CSV
-snapshot that passed DQ and that you approved — not the live `marts` table — so a later failed run
+snapshot that passed DQ and that you approved - not the live `marts` table - so a later failed run
 can't leak un-published rows:
 
 Use the exact REST/CSV links shown in the panel. Chat publications are prefixed with their session
@@ -90,14 +90,14 @@ publish a report named `daily_branch_summary` without replacing each other.
 
 ### 5. Reopen the session
 
-Reload the page or restart the server and reselect the session in the sidebar — its message and
+Reload the page or restart the server and reselect the session in the sidebar - its message and
 tool-block history reconstruct from the DuckDB `platform` schema. The per-session audit trail
 (write tool calls, approvals, DQ results) is available at `GET /api/sessions/:id/lineage`; the
 "approved before executed" invariant reads straight off its `seq` order.
 
 ---
 
-## Part 2 — attach a live Postgres (Neon)
+## Part 2 - attach a live Postgres (Neon)
 
 This satisfies the PRD §5 criterion *"connect a local Postgres and query its tables (and join a
 CSV to a PG table) via NL."*
@@ -108,21 +108,21 @@ CSV to a PG table) via NL."*
    MVP is documented against). A default `neondb` database is fine.
 2. Open the Neon **SQL Editor** (or connect with `psql`) and run the contents of
    [`fixtures/pg_seed.sql`](./fixtures/pg_seed.sql). It creates two synthetic lending tables:
-   - `branches` — one row per branch (`north`/`south`/`east`/`west`) with its `region` and
+   - `branches` - one row per branch (`north`/`south`/`east`/`west`) with its `region` and
      `manager`. This is the reference side the CSV lacks.
-   - `loans` — a small live loan book, so the attached database has more than one table.
+   - `loans` - a small live loan book, so the attached database has more than one table.
 
    The seed is written in the SQL subset both Postgres and DuckDB accept, so the project's test
-   suite can also run it against an in-memory DuckDB — the fixture stays honest with no live DB.
+   suite can also run it against an in-memory DuckDB - the fixture stays honest with no live DB.
 
-### 2. Get the connection string — **direct endpoint, `sslmode=require`**
+### 2. Get the connection string - **direct endpoint, `sslmode=require`**
 
 In the Neon dashboard, copy the connection string, then make two adjustments that DuckDB's
 Postgres driver needs:
 
 - **Use the direct (non-pooled) endpoint.** Neon's default string points at the PgBouncer pooler
   (host contains `-pooler`). DuckDB's `postgres` extension opens its own session-level connection
-  and does not work through the transaction pooler — **delete the `-pooler` suffix** from the host
+  and does not work through the transaction pooler - **delete the `-pooler` suffix** from the host
   so you get the direct endpoint.
 - **Keep `sslmode=require`.** Neon only accepts TLS connections.
 
@@ -132,17 +132,17 @@ The result looks like:
 postgresql://<user>:<password>@ep-xxx-xxx.<region>.aws.neon.tech/neondb?sslmode=require
 ```
 
-(direct host — note: no `-pooler`).
+(direct host - note: no `-pooler`).
 
 ### 3. Register it in the app
 
-In the running app, open **Settings → Connections** — the *only* place a database URL is entered.
+In the running app, open **Settings → Connections** - the *only* place a database URL is entered.
 Add the connection by a short name (a SQL identifier, e.g. `neon`), paste the URL, and **Test** it.
 The URL is stored server-side in the gitignored warehouse and is **never** sent back to the
-browser, the chat, or the model — the agent only ever sees the connection *name* and the table
+browser, the chat, or the model - the agent only ever sees the connection *name* and the table
 schema.
 
-Then, in a chat session, ask the agent to attach it and query across it — e.g.
+Then, in a chat session, ask the agent to attach it and query across it - e.g.
 
 > *attach neon and show total balance by region, joining my loans CSV to the branches table*
 
@@ -171,4 +171,4 @@ With it set, three gated cases run instead of skipping: the connection prober
 (`server/connections/postgres.test.ts`), the read-only attach + schema introspection
 (`server/connections/attach.test.ts`), and the end-to-end CSV↔Postgres join through `run_query`
 (`tests/pg-fixture.test.ts`). The last asserts the CSV's loans grouped by the region the live
-`branches` table supplies — the FR5b acceptance path, proven against real Postgres.
+`branches` table supplies - the FR5b acceptance path, proven against real Postgres.
